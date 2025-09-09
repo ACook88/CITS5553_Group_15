@@ -1,19 +1,10 @@
 import React, { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  Upload, FileArchive, Trash2, CheckCircle2, AlertCircle, Sparkles, X, BarChart3, GitCompare, Download, Info, LayoutGrid} from "lucide-react";
+import { Upload, FileArchive, Trash2, CheckCircle2, AlertCircle, Sparkles, X, BarChart3, GitCompare, Download, Info, LayoutGrid} from "lucide-react";
 import JSZip from "jszip";
 import * as THREE from "three";
 import ComparisonHeatmap from "./components/ComparisonHeatmap";
 import { createRun } from "./api/runs";
-
-/**
- * ESRI 3D Comparison — Inline files lists
- * - Stepper hidden on About.
- * - Steps: 1 Original, 2 DL, 3 Mapping, 4 Method, 5 Grid, 6 Plot.
- * - Step 3 “Mapping” ticks after “Run Analysis” is pressed.
- * - File lists now render under Load Data, Original at left and DL at right.
- */
 
 const isZipName = (name: string) => name.toLowerCase().trim().endsWith(".zip");
 const clampPercent = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
@@ -308,6 +299,46 @@ export default function ESRI3DComparisonApp() {
     alert(`Exporting ${type.toUpperCase()}… (wire to backend)`);
   }
 
+  // --- Reset helpers ---
+  function resetDataLoading() {
+    setOriginalZip(null);
+    setDlZip(null);
+    setErrors({});
+    setOriginalColumns([]);
+    setDlColumns([]);
+    setLoadingColumns(false);
+    setOriginalList([]);
+    setDlList([]);
+    setProgress({ original: 0, dl: 0 });
+    setDataLoaded(false);
+    // Reset file input elements so the same file can be re-uploaded
+    if (inputOriginalRef.current) inputOriginalRef.current.value = "";
+    if (inputDlRef.current) inputDlRef.current.value = "";
+    resetAnalysis();
+  }
+  function resetAnalysis() {
+    setOriginalMap({});
+    setDlMap({});
+    setAnalysisRun(false);
+    resetComparison();
+  }
+  function resetComparison() {
+    setMethod(null);
+    setBins(10);
+    setGridSize(null);
+    setRunId(null);
+    setRunError(null);
+    setBusyRun(false);
+    setUnzipping(false);
+    // Dispose three.js visualization and clear plotRef
+    if (threeRef.current) safelyDisposeThree(plotRef.current);
+    if (plotRef.current && plotRef.current.firstChild) {
+      while (plotRef.current.firstChild) {
+        plotRef.current.removeChild(plotRef.current.firstChild);
+      }
+    }
+  }
+
   // Only enable Comparison after Run Analysis has been clicked
   const canGoToComparison = analysisRun;
 
@@ -435,6 +466,15 @@ export default function ESRI3DComparisonApp() {
                     </span>
                   )}
                 </button>
+                {dataLoaded && (
+                  <button
+                    type="button"
+                    className="ml-2 rounded-xl px-4 py-2 text-sm font-medium bg-neutral-200 text-neutral-700 hover:bg-neutral-300 transition"
+                    onClick={resetDataLoading}
+                  >
+                    Clear
+                  </button>
+                )}
               </div>
 
               {/* Inline file lists below the Load button */}
@@ -454,6 +494,18 @@ export default function ESRI3DComparisonApp() {
                   />
                 </section>
               )}
+
+              {/* Go to Data Analysis button */}
+              {dataLoaded && !!originalZip && !!dlZip && (
+                <div className="mt-6 flex justify-end">
+                  <button
+                    className="rounded-xl px-5 py-2.5 text-sm font-medium bg-[#7C3AED] text-white hover:bg-[#6D28D9] transition"
+                    onClick={() => setSection("data-analysis")}
+                  >
+                    Go to Data Analysis
+                  </button>
+                </div>
+              )}
             </>
           )}
 
@@ -470,17 +522,33 @@ export default function ESRI3DComparisonApp() {
                   <MappingForm title="DL" columns={dlColumns} mapping={dlMap} onChange={setDlMap} />
                 </div>
 
-                <div className="mt-5">
+                <div className="mt-5 flex items-center gap-2">
                   <button
                     onClick={() => setAnalysisRun(true)}
-                    disabled={!mappingComplete}
+                    disabled={!mappingComplete || analysisRun}
                     className={
-                      "rounded-xl px-5 py-2.5 text-sm font-medium transition " +
-                      (mappingComplete ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]" : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
+                      "rounded-xl px-5 py-2.5 text-sm font-medium transition flex items-center gap-2 " +
+                      (mappingComplete && !analysisRun
+                        ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
+                        : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                     }
                   >
                     Run Analysis
+                    {analysisRun && (
+                      <span className="inline-flex items-center text-[#10B981] ml-2">
+                        <CheckCircle2 className="h-5 w-5" />
+                      </span>
+                    )}
                   </button>
+                  {analysisRun && (
+                    <button
+                      type="button"
+                      className="ml-2 rounded-xl px-4 py-2 text-sm font-medium bg-neutral-200 text-neutral-700 hover:bg-neutral-300 transition"
+                      onClick={resetAnalysis}
+                    >
+                      Clear
+                    </button>
+                  )}
                 </div>
 
                 {analysisRun && (
@@ -498,20 +566,32 @@ export default function ESRI3DComparisonApp() {
                 <InfoCard label="DL columns" value={dlColumns.length ? dlColumns.length : "—"} hint="After Load Data" />
                 <InfoCard label="Mappings complete" value={mappingComplete ? "Yes" : "No"} hint="Select all 3 per side" />
               </section>
+
+              {/* Go to Comparison button at the bottom */}
+              {analysisRun && (
+                <div className="mt-6 flex justify-end">
+                  <button
+                    className="rounded-xl px-5 py-2.5 text-sm font-medium bg-[#7C3AED] text-white hover:bg-[#6D28D9] transition"
+                    onClick={() => setSection("comparisons")}
+                  >
+                    Go to Comparison
+                  </button>
+                </div>
+              )}
             </>
           )}
 
           {/* Comparisons */}
           {section === "comparisons" && (
             <>
-              <div className={comparisonControlsEnabled ? "" : "opacity-50 pointer-events-none"}>
+              <div className={analysisRun ? "" : "opacity-50 pointer-events-none"}>
                 <ControlsBar
                   method={method}
-                  onMethodChange={comparisonControlsEnabled ? setMethod : () => {}}
+                  onMethodChange={analysisRun ? setMethod : () => {}}
                   bins={bins}
-                  onBinsChange={comparisonControlsEnabled ? setBins : () => {}}
+                  onBinsChange={analysisRun ? setBins : () => {}}
                   gridSize={gridSize}
-                  onGridSizeChange={comparisonControlsEnabled ? setGridSize : () => {}}
+                  onGridSizeChange={analysisRun ? setGridSize : () => {}}
                 />
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
@@ -522,17 +602,31 @@ export default function ESRI3DComparisonApp() {
                   <button
                     type="button"
                     onClick={onRun}
-                    disabled={!readyToRun || !comparisonControlsEnabled}
-                    aria-disabled={!readyToRun || !comparisonControlsEnabled}
+                    disabled={!readyToRun || !analysisRun || !!runId}
+                    aria-disabled={!readyToRun || !analysisRun || !!runId}
                     className={
-                      "rounded-xl px-4 py-2 transition " +
-                      (readyToRun && comparisonControlsEnabled
+                      "rounded-xl px-4 py-2 transition flex items-center gap-2 " +
+                      (readyToRun && analysisRun && !runId
                         ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9] shadow"
                         : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                     }
                   >
-                    {busyRun ? "Running…" : "Run Comparison"}
+                    Run Comparison
+                    {runId && (
+                      <span className="inline-flex items-center text-[#10B981] ml-2">
+                        <CheckCircle2 className="h-5 w-5" />
+                      </span>
+                    )}
                   </button>
+                  {runId && (
+                    <button
+                      type="button"
+                      className="ml-2 rounded-xl px-4 py-2 text-sm font-medium bg-neutral-200 text-neutral-700 hover:bg-neutral-300 transition"
+                      onClick={resetComparison}
+                    >
+                      Clear
+                    </button>
+                  )}
                   {runError && <span style={{ color: "#c00" }}>{runError}</span>}
                 </motion.div>
               </div>
@@ -554,17 +648,28 @@ export default function ESRI3DComparisonApp() {
                 </motion.div>
               </section>
               {runId && (
-                <div style={{ marginTop: 16 }}>
-                  <ComparisonHeatmap
-                    runId={runId}
-                    apiBase="/api"
-                    method={(method ?? "max") as "max" | "mean" | "median" | "chi2"}
-                    thresholdMode="quantile"
-                    thresholdValue={0.9}
-                    width={900}
-                    cellSizePx={10}
-                  />
-                </div>
+                <>
+                  <div style={{ marginTop: 16 }}>
+                    <ComparisonHeatmap
+                      runId={runId}
+                      apiBase="/api"
+                      method={(method ?? "max") as "max" | "mean" | "median" | "chi2"}
+                      thresholdMode="quantile"
+                      thresholdValue={0.9}
+                      width={900}
+                      cellSizePx={10}
+                    />
+                  </div>
+                  {/* Go to Export button */}
+                  <div className="mt-6 flex justify-end">
+                    <button
+                      className="rounded-xl px-5 py-2.5 text-sm font-medium bg-[#7C3AED] text-white hover:bg-[#6D28D9] transition"
+                      onClick={() => setSection("export")}
+                    >
+                      Go to Export (download CSV & plot)
+                    </button>
+                  </div>
+                </>
               )}
             </>
           )}
