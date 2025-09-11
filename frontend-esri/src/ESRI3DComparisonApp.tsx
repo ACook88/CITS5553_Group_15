@@ -6,7 +6,11 @@ import * as THREE from "three";
 import ComparisonHeatmap from "./components/ComparisonHeatmap";
 import { createRun } from "./api/runs";
 
-const isZipName = (name: string) => name.toLowerCase().trim().endsWith(".zip");
+const isAcceptedName = (name: string) => {
+  const lower = name.toLowerCase().trim();
+  return lower.endsWith(".zip") || lower.endsWith(".csv");
+};
+const isAccepted = (file: File | null | undefined) => !!file && isAcceptedName(file.name);
 const clampPercent = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
 const REQUIRED_FIELD_KEYS = ["Northing", "Easting", "Assay"] as const;
@@ -86,7 +90,7 @@ export default function ESRI3DComparisonApp() {
 
   const [dataLoaded, setDataLoaded] = useState(false);
 
-  const isZip = (file: File | null | undefined) => !!file && isZipName(file.name);
+  const isZip = (file: File | null | undefined) => !!file && isAcceptedName(file.name);
 
   const validateAndSet = useCallback((file: File | null, kind: "original" | "dl") => {
     if (!file) {
@@ -95,8 +99,8 @@ export default function ESRI3DComparisonApp() {
       setErrors((e) => ({ ...e, [kind]: undefined }));
       return;
     }
-    if (!isZip(file)) {
-      setErrors((e) => ({ ...e, [kind]: "Only .zip files are accepted." }));
+    if (!isAccepted(file)) {
+      setErrors((e) => ({ ...e, [kind]: "Only .zip or .csv files are accepted." }));
       return;
     }
     setErrors((e) => ({ ...e, [kind]: undefined }));
@@ -196,6 +200,10 @@ export default function ESRI3DComparisonApp() {
 
   async function inspectZipColumns(file: File): Promise<string[]> {
     try {
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        // For CSV, fake columns (should parse header in real app)
+        return ["ID", "Northing", "Easting", "RL", "Assay", "Te_ppm", "Au_ppb", "Depth"];
+      }
       const buf = await file.arrayBuffer();
       await JSZip.loadAsync(buf);
       return ["ID", "Northing", "Easting", "RL", "Assay", "Te_ppm", "Au_ppb", "Depth"];
@@ -212,6 +220,13 @@ export default function ESRI3DComparisonApp() {
     setProgress({ original: 0, dl: 0 });
 
     const unzipAndList = async (file: File, which: "original" | "dl") => {
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        // Treat CSV as a single file in the list
+        const items = [{ name: file.name, size: file.size }];
+        if (which === "original") setOriginalList(items); else setDlList(items);
+        setProgress((p) => ({ ...p, [which]: 100 }));
+        return;
+      }
       const buf = await file.arrayBuffer();
       const zip = await JSZip.loadAsync(buf);
       const entries = Object.values(zip.files);
@@ -345,7 +360,7 @@ export default function ESRI3DComparisonApp() {
   return (
     <div className="min-h-screen bg-white text-[#111827] flex">
       {/* Sidebar */}
-      <aside className="hidden md:flex md:flex-col w-64 border-r border-neutral-200 bg-[#F9FAFB]">
+      <aside className="hidden md:flex md:flex-col fixed top-0 left-0 h-screen w-64 border-r border-neutral-200 bg-[#F9FAFB] z-30">
         <div className="px-4 pt-8 pb-4 flex items-start gap-3">
           <div className="rounded-2xl bg-[#7C3AED] text-white p-2 shadow-sm"><Sparkles className="h-5 w-5" /></div>
           <div>
@@ -385,7 +400,7 @@ export default function ESRI3DComparisonApp() {
       </aside>
 
       {/* Main */}
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 md:ml-64">
         <header>
           <div className="mx-auto max-w-6xl px-4 pt-8 pb-4 md:pt-10 md:pb-6">
             <div className="flex items-start gap-3 md:hidden">
@@ -415,14 +430,14 @@ export default function ESRI3DComparisonApp() {
         <SuccessToast toast={toast} onClose={() => setToast(null)} />
 
         <main className="mx-auto max-w-6xl px-4 pb-16">
-          {/* Data Loading */}
+          {/* Data Selection */}
           {section === "data-loading" && (
             <>
               <div className="grid gap-6 md:grid-cols-2">
                 <UploadPanel
                   step={1}
                   title="File Upload for Original ESRI Data"
-                  subtitle="Only .zip files are accepted. Drag & drop or click to browse."
+                  subtitle="Only .zip or .csv files are accepted. Drag & drop or click to browse."
                   file={originalZip}
                   error={errors.original}
                   onClear={() => validateAndSet(null, "original")}
@@ -430,13 +445,13 @@ export default function ESRI3DComparisonApp() {
                   onDragOver={(e: React.DragEvent<HTMLDivElement>) => onDragOver(e)}
                   onBrowse={() => inputOriginalRef.current?.click()}
                 >
-                  <input ref={inputOriginalRef} type="file" accept=".zip" className="hidden" onChange={(e) => handleInput(e, "original")} />
+                  <input ref={inputOriginalRef} type="file" accept=".zip,.csv" className="hidden" onChange={(e) => handleInput(e, "original")} />
                 </UploadPanel>
 
                 <UploadPanel
                   step={2}
                   title="File Upload for DL ESRI Data"
-                  subtitle="Only .zip files are accepted. Drag & drop or click to browse."
+                  subtitle="Only .zip or .csv files are accepted. Drag & drop or click to browse."
                   file={dlZip}
                   error={errors.dl}
                   onClear={() => validateAndSet(null, "dl")}
@@ -444,7 +459,7 @@ export default function ESRI3DComparisonApp() {
                   onDragOver={(e: React.DragEvent<HTMLDivElement>) => onDragOver(e)}
                   onBrowse={() => inputDlRef.current?.click()}
                 >
-                  <input ref={inputDlRef} type="file" accept=".zip" className="hidden" onChange={(e) => handleInput(e, "dl")} />
+                  <input ref={inputDlRef} type="file" accept=".zip,.csv" className="hidden" onChange={(e) => handleInput(e, "dl")} />
                 </UploadPanel>
               </div>
 
@@ -631,7 +646,7 @@ export default function ESRI3DComparisonApp() {
                 </motion.div>
               </div>
               <section className="mt-8">
-                <h2 className="text-lg font-semibold mb-3">3D Plot</h2>
+                <h2 className="text-lg font-semibold mb-3">Plots (Original/ DL/ Comparison)</h2>
                 <motion.div
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -791,12 +806,12 @@ function UploadPanel({ step, title, subtitle, file, error, onClear, onDrop, onDr
         tabIndex={0}
         onClick={onBrowse}
         onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onBrowse()}
-        aria-label="Upload .zip file"
+        aria-label="Upload .zip or .csv file"
       >
         <div className="px-6 py-10 text-center">
           <div className="mx-auto mb-4 h-12 w-12 rounded-2xl bg-[#7C3AED]/10 grid place-items-center text-[#7C3AED]"><Upload className="h-6 w-6" /></div>
-          <p className="text-sm font-semibold">Drag & drop a .zip here, or <span className="underline text-[#7C3AED]">browse</span></p>
-          <div className="mt-2 flex items-center justify-center gap-2 text-xs text-neutral-600"><Badge><FileArchive className="h-3.5 w-3.5" /> .zip only</Badge></div>
+          <p className="text-sm font-semibold">Drag & drop a .zip or .csv here, or <span className="underline text-[#7C3AED]">browse</span></p>
+          <div className="mt-2 flex items-center justify-center gap-2 text-xs text-neutral-600"><Badge><FileArchive className="h-3.5 w-3.5" /> .zip or .csv</Badge></div>
         </div>
         {children}
       </div>
@@ -1029,7 +1044,7 @@ function MappingForm({ title, columns, mapping, onChange }: { title: string; col
                 onChange={(e) => setField(label as RequiredFieldKey, e.target.value)}
                 className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
               >
-                <option value="">—</option>
+                <option value="">Please select a column</option>
                 {columns.map((c) => (
                   <option key={c} value={c}>{c}</option>
                 ))}
