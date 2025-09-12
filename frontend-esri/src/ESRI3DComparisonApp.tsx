@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useRef, useState, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion";
 import { Upload, FileArchive, Trash2, CheckCircle2, AlertCircle, Sparkles, X, BarChart3, GitCompare, Download, Info, LayoutGrid} from "lucide-react";
 import JSZip from "jszip";
+import Papa from "papaparse";
 import * as THREE from "three";
 import ComparisonHeatmap from "./components/ComparisonHeatmap";
 import { createRun } from "./api/runs";
@@ -198,19 +199,56 @@ export default function ESRI3DComparisonApp() {
 
   useEffect(() => () => { safelyDisposeThree(plotRef.current); }, [safelyDisposeThree]);
 
+  // ===== CSV/ZIP header extraction =====
+  async function parseCsvHeaderFromString(text: string): Promise<string[]> {
+    return new Promise((resolve) => {
+      Papa.parse(text, {
+        header: true,
+        preview: 1,           // only first row needed for header
+        skipEmptyLines: true,
+        complete: (res) => {
+          const fields = (res.meta?.fields ?? []).filter(Boolean) as string[];
+          resolve(fields);
+        },
+        error: () => resolve([]),
+      });
+    });
+  }
+
+  async function headersFromCsvFile(file: File): Promise<string[]> {
+    const text = await file.text();
+    return parseCsvHeaderFromString(text);
+  }
+
+  async function headersFromZipFile(file: File): Promise<string[]> {
+    const buf = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(buf);
+
+    // pick the largest CSV if multiple, else first
+    const csvEntries = Object.values(zip.files).filter((f) => f.name.toLowerCase().endsWith(".csv"));
+    if (csvEntries.length === 0) return [];
+
+    const best = csvEntries
+      .map((f) => ({ f, size: (f as any)?._data?.uncompressedSize ?? 0 }))
+      .sort((a, b) => b.size - a.size)[0].f;
+
+    const text = await best.async("string");
+    return parseCsvHeaderFromString(text);
+  }
+
   async function inspectZipColumns(file: File): Promise<string[]> {
     try {
-      if (file.name.toLowerCase().endsWith('.csv')) {
-        // For CSV, fake columns (should parse header in real app)
-        return ["ID", "Northing", "Easting", "RL", "Assay", "Te_ppm", "Au_ppb", "Depth"];
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        return await headersFromCsvFile(file);
       }
-      const buf = await file.arrayBuffer();
-      await JSZip.loadAsync(buf);
-      return ["ID", "Northing", "Easting", "RL", "Assay", "Te_ppm", "Au_ppb", "Depth"];
-    } catch {
-      return ["ID", "Northing", "Easting", "Assay"];
+      // .zip
+      return await headersFromZipFile(file);
+    } catch (e) {
+      console.warn("Header detection failed:", e);
+      return [];
     }
   }
+  // =====================================
 
   async function onLoadData() {
     if (!originalZip || !dlZip || loadingColumns || dataLoaded) return;
@@ -221,7 +259,6 @@ export default function ESRI3DComparisonApp() {
 
     const unzipAndList = async (file: File, which: "original" | "dl") => {
       if (file.name.toLowerCase().endsWith('.csv')) {
-        // Treat CSV as a single file in the list
         const items = [{ name: file.name, size: file.size }];
         if (which === "original") setOriginalList(items); else setDlList(items);
         setProgress((p) => ({ ...p, [which]: 100 }));
@@ -268,6 +305,8 @@ export default function ESRI3DComparisonApp() {
       setDlMap({});
       setAnalysisRun(false);
       setDataLoaded(true);
+      console.log("[ORIG] Detected columns:", a);
+      console.log("[DL]   Detected columns:", b);
     } finally {
       setLoadingColumns(false);
     }
@@ -275,8 +314,6 @@ export default function ESRI3DComparisonApp() {
 
   async function onRun() {
     setRunError(null);
-    // setOriginalList([]); // Do not clear file lists
-    // setDlList([]); // Do not clear file lists
     setProgress({ original: 0, dl: 0 });
     setUnzipping(false);
     setRunId(null);
@@ -326,7 +363,6 @@ export default function ESRI3DComparisonApp() {
     setDlList([]);
     setProgress({ original: 0, dl: 0 });
     setDataLoaded(false);
-    // Reset file input elements so the same file can be re-uploaded
     if (inputOriginalRef.current) inputOriginalRef.current.value = "";
     if (inputDlRef.current) inputDlRef.current.value = "";
     resetAnalysis();
@@ -345,7 +381,6 @@ export default function ESRI3DComparisonApp() {
     setRunError(null);
     setBusyRun(false);
     setUnzipping(false);
-    // Dispose three.js visualization and clear plotRef
     if (threeRef.current) safelyDisposeThree(plotRef.current);
     if (plotRef.current && plotRef.current.firstChild) {
       while (plotRef.current.firstChild) {
@@ -364,7 +399,7 @@ export default function ESRI3DComparisonApp() {
         <div className="px-4 pt-8 pb-4 flex items-start gap-3">
           <div className="rounded-2xl bg-[#7C3AED] text-white p-2 shadow-sm"><Sparkles className="h-5 w-5" /></div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight">ESRI Comparison</h1>
+            <h1 className="text-lg font-bold tracking-tight">ESRI Comparisonss</h1>
             <p className="text-xs text-neutral-600">Original vs DL assay checks</p>
           </div>
         </div>
