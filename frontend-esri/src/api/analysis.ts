@@ -66,12 +66,43 @@ export async function runPlots(
   return res.json();
 }
 
+export type PlotlyPlotData = {
+  data: any[];
+  layout: any;
+};
+
+export type PlotlyPlotsResponse = {
+  original_histogram: PlotlyPlotData;
+  dl_histogram: PlotlyPlotData;
+  qq_plot: PlotlyPlotData;
+};
+
+export async function runPlotsPlotly(
+  originalFile: File,
+  dlFile: File,
+  originalAssay: string,
+  dlAssay: string
+): Promise<PlotlyPlotsResponse> {
+  const form = new FormData();
+  form.append("original", originalFile);
+  form.append("dl", dlFile);
+  form.append("original_assay", originalAssay);
+  form.append("dl_assay", dlAssay);
+
+  const res = await fetch(`${API}/api/analysis/plots-plotly`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function runComparison(
   originalFile: File,
   dlFile: File,
   map: {
     oN: string;
-    oE: string;
+    oE: string; 
     oA: string;
     dN: string;
     dE: string;

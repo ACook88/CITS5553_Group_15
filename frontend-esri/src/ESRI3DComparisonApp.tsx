@@ -20,10 +20,13 @@ import {
   Info,
   LayoutGrid,
 } from "lucide-react";
-import JSZip from "jszip";
-import * as THREE from "three";
 import { fetchColumns } from "./api/data";
-import { runSummary, runPlots, runComparison } from "./api/analysis";
+import {
+  runSummary,
+  runPlotsPlotly,
+  runComparison,
+  type PlotlyPlotsResponse,
+} from "./api/analysis";
 import Plot from "react-plotly.js";
 
 const isAcceptedName = (name: string) => {
@@ -32,19 +35,10 @@ const isAcceptedName = (name: string) => {
 };
 const isAccepted = (file: File | null | undefined) =>
   !!file && isAcceptedName(file.name);
-const clampPercent = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
 const REQUIRED_FIELD_KEYS = ["Northing", "Easting", "Assay"] as const;
 type RequiredFieldKey = (typeof REQUIRED_FIELD_KEYS)[number];
 type ColumnMapping = Partial<Record<RequiredFieldKey, string>>;
-
-type ThreeStash = {
-  renderer: THREE.WebGLRenderer;
-  scene: THREE.Scene;
-  camera: THREE.PerspectiveCamera;
-  animId: number;
-  onResize: () => void;
-};
 
 export default function ESRI3DComparisonApp() {
   type Section =
@@ -84,11 +78,11 @@ export default function ESRI3DComparisonApp() {
 
   // --- Plots state ---
   const [plotsLoading, setPlotsLoading] = useState(false);
-  const [plots, setPlots] = useState<{
-    original?: string;
-    dl?: string;
-    qq?: string;
-  }>({});
+
+  // --- Plotly plots state ---
+  const [plotlyPlots, setPlotlyPlots] = useState<PlotlyPlotsResponse | null>(
+    null
+  );
 
   // Add these two states near your other useState lines
   const [gridOut, setGridOut] = useState<null | {
@@ -119,7 +113,6 @@ export default function ESRI3DComparisonApp() {
   const [runId, setRunId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [busyRun, setBusyRun] = useState(false);
-  const [unzipping, setUnzipping] = useState(false);
   const [originalList, setOriginalList] = useState<
     Array<{ name: string; size: number }>
   >([]);
@@ -134,7 +127,6 @@ export default function ESRI3DComparisonApp() {
   const inputOriginalRef = useRef<HTMLInputElement | null>(null);
   const inputDlRef = useRef<HTMLInputElement | null>(null);
   const plotRef = useRef<HTMLDivElement | null>(null);
-  const threeRef = useRef<ThreeStash | null>(null);
 
   // Mapping completeness (used only to enable Run Analysis)
   const mappingComplete = useMemo(() => {
@@ -142,9 +134,6 @@ export default function ESRI3DComparisonApp() {
     const rightOk = REQUIRED_FIELD_KEYS.every((k) => !!dlMap[k]);
     return leftOk && rightOk;
   }, [originalMap, dlMap]);
-
-  // Controls enabled after both uploads
-  const comparisonControlsEnabled = !!originalZip && !!dlZip;
 
   // Export after 1,2,4 chosen
   const exportEnabled = !!originalZip && !!dlZip && method !== null;
@@ -162,9 +151,6 @@ export default function ESRI3DComparisonApp() {
     !busyRun;
 
   const [dataLoaded, setDataLoaded] = useState(false);
-
-  const isZip = (file: File | null | undefined) =>
-    !!file && isAcceptedName(file.name);
 
   const validateAndSet = useCallback(
     (file: File | null, kind: "original" | "dl") => {
@@ -213,136 +199,6 @@ export default function ESRI3DComparisonApp() {
     ev.preventDefault();
 
   // three.js helpers
-  const safelyDisposeThree = useCallback((container: HTMLDivElement | null) => {
-    const stash = threeRef.current;
-    if (!stash) return;
-    try {
-      cancelAnimationFrame(stash.animId);
-    } catch {}
-    try {
-      window.removeEventListener("resize", stash.onResize);
-    } catch {}
-    try {
-      const canvas = stash.renderer?.domElement;
-      const parent = canvas?.parentNode as (Node & ParentNode) | null;
-      if (canvas && parent && parent.contains(canvas))
-        parent.removeChild(canvas);
-    } catch {}
-    try {
-      stash.renderer?.dispose();
-    } catch {}
-    threeRef.current = null;
-  }, []);
-
-  const renderPlaceholder3D = useCallback(() => {
-    const container = plotRef.current;
-    if (!container) return;
-    safelyDisposeThree(container);
-
-    const width = container.clientWidth || 640;
-    const height = container.clientHeight || 420;
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf9fafb);
-
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    camera.position.set(3, 2.2, 4);
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio || 1);
-    renderer.setSize(width, height);
-    container.appendChild(renderer.domElement);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
-    dir.position.set(5, 10, 7);
-    scene.add(dir);
-
-    const planeGeo = new THREE.PlaneGeometry(12, 12);
-    const planeMat = new THREE.MeshStandardMaterial({
-      color: 0xeeeeee,
-      roughness: 1,
-      metalness: 0,
-    });
-    const plane = new THREE.Mesh(planeGeo, planeMat);
-    plane.rotation.x = -Math.PI / 2;
-    plane.position.y = -1.25;
-    plane.receiveShadow = true;
-    scene.add(plane);
-
-    const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
-    const purpleMat = new THREE.MeshStandardMaterial({ color: 0x7c3aed });
-    const amberMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b });
-    const cube1 = new THREE.Mesh(cubeGeo, purpleMat);
-
-    const clock = new THREE.Clock();
-    const animate = () => {
-      const t = clock.getElapsedTime();
-      cube1.rotation.x = t * 0.6;
-      cube1.rotation.y = t * 0.9;
-      cube2.rotation.x = -t * 0.5;
-      cube2.rotation.y = -t * 0.8;
-      renderer.render(scene, camera);
-      const id = requestAnimationFrame(animate);
-      if (threeRef.current) threeRef.current.animId = id;
-    };
-
-    const onResize = () => {
-      const w = container.clientWidth || width;
-      const h = container.clientHeight || height;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    };
-
-    window.addEventListener("resize", onResize);
-    threeRef.current = {
-      renderer,
-      scene,
-      camera,
-      animId: requestAnimationFrame(animate),
-      onResize,
-    };
-  }, [safelyDisposeThree]);
-
-  useEffect(
-    () => () => {
-      safelyDisposeThree(plotRef.current);
-    },
-    [safelyDisposeThree]
-  );
-
-  async function inspectZipColumns(file: File): Promise<string[]> {
-    try {
-      if (file.name.toLowerCase().endsWith(".csv")) {
-        // For CSV, fake columns (should parse header in real app)
-        return [
-          "ID",
-          "Northing",
-          "Easting",
-          "RL",
-          "Assay",
-          "Te_ppm",
-          "Au_ppb",
-          "Depth",
-        ];
-      }
-      const buf = await file.arrayBuffer();
-      await JSZip.loadAsync(buf);
-      return [
-        "ID",
-        "Northing",
-        "Easting",
-        "RL",
-        "Assay",
-        "Te_ppm",
-        "Au_ppb",
-        "Depth",
-      ];
-    } catch {
-      return ["ID", "Northing", "Easting", "Assay"];
-    }
-  }
 
   async function onLoadData() {
     if (!originalZip || !dlZip || loadingColumns || dataLoaded) return;
@@ -430,13 +286,9 @@ export default function ESRI3DComparisonApp() {
     }
     try {
       setPlotsLoading(true);
-      setPlots({});
-      const r = await runPlots(originalZip, dlZip, oAssay, dAssay);
-      setPlots({
-        original: `data:image/png;base64,${r.original_png}`,
-        dl: `data:image/png;base64,${r.dl_png}`,
-        qq: `data:image/png;base64,${r.qq_png}`,
-      });
+      setPlotlyPlots(null);
+      const r = await runPlotsPlotly(originalZip, dlZip, oAssay, dAssay);
+      setPlotlyPlots(r);
     } catch (e: any) {
       console.error(e);
       alert(e?.message || "Failed to render plots");
@@ -525,7 +377,7 @@ export default function ESRI3DComparisonApp() {
     setAnalysisRun(false);
     setStatsOriginal(null);
     setStatsDl(null);
-    setPlots({}); // <-- clear plots state as well
+    setPlotlyPlots(null); // <-- clear plotly plots state as well
     setPlotsLoading(false); // <-- reset loading state for plots
     resetComparison();
   }
@@ -535,44 +387,14 @@ export default function ESRI3DComparisonApp() {
     setRunId(null);
     setRunError(null);
     setBusyRun(false);
-    setUnzipping(false);
     setGridOut(null); // NEW: clear plots when resetting comparison
-    // Dispose three.js visualization and clear plotRef
-    if (threeRef.current) safelyDisposeThree(plotRef.current);
+    // Clear plotRef
     if (plotRef.current && plotRef.current.firstChild) {
       while (plotRef.current.firstChild) {
         plotRef.current.removeChild(plotRef.current.firstChild);
       }
     }
   }
-
-  // Only enable Comparison after Run Analysis has been clicked
-  const canGoToComparison = analysisRun;
-
-  // Lightbox state and helpers
-  const [lightboxOpen, setLightboxOpen] = useState(false);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-  const [lightboxTitle, setLightboxTitle] = useState<string>("");
-
-  function openLightbox(src: string, title: string) {
-    setLightboxSrc(src);
-    setLightboxTitle(title);
-    setLightboxOpen(true);
-  }
-
-  function closeLightbox() {
-    setLightboxOpen(false);
-    setLightboxSrc(null);
-    setLightboxTitle("");
-  }
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") closeLightbox();
-    }
-    if (lightboxOpen) document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [lightboxOpen]);
 
   return (
     <div className="min-h-screen bg-white text-[#111827] flex">
@@ -830,23 +652,19 @@ export default function ESRI3DComparisonApp() {
                   </button>
                   <button
                     onClick={handleShowPlots}
-                    disabled={
-                      !analysisRun ||
-                      plotsLoading ||
-                      !!(plots.original && plots.dl && plots.qq)
-                    }
+                    disabled={!analysisRun || plotsLoading || !!plotlyPlots}
                     className={
                       "rounded-xl px-5 py-2.5 text-sm font-medium transition flex items-center gap-2 " +
                       (!analysisRun || plotsLoading
                         ? "bg-neutral-200 text-neutral-500 cursor-not-allowed"
-                        : !plots.original || !plots.dl || !plots.qq
+                        : !plotlyPlots
                         ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
                         : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                     }
                   >
                     {plotsLoading ? (
                       "Rendering…"
-                    ) : plots.original && plots.dl && plots.qq ? (
+                    ) : plotlyPlots ? (
                       <>
                         Show Plots
                         <span className="inline-flex items-center text-[#10B981] ml-2">
@@ -903,89 +721,61 @@ export default function ESRI3DComparisonApp() {
                 )}
 
                 {/* Plots gallery */}
-                {analysisRun &&
-                  !analysisLoading &&
-                  (plots.original || plots.dl || plots.qq) && (
-                    <section className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div className="rounded-2xl border border-neutral-200 bg-white p-3">
-                        <div className="text-sm font-medium mb-2">
-                          Original histogram
-                        </div>
-                        {plots.original ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              plots.original &&
-                              openLightbox(plots.original, "Original histogram")
-                            }
-                            className="block w-full cursor-zoom-in"
-                            aria-label="Open Original histogram"
-                          >
-                            <img
-                              src={plots.original}
-                              alt="Original histogram"
-                              className="w-full h-[260px] object-contain rounded-xl bg-[#F9FAFB] border border-neutral-100"
-                            />
-                          </button>
-                        ) : (
-                          <div className="h-[260px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
-                            No plot yet
-                          </div>
-                        )}
+                {analysisRun && !analysisLoading && plotlyPlots && (
+                  <section className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="rounded-2xl border border-neutral-200 bg-white p-3">
+                      <div className="text-sm font-medium mb-2">
+                        Original histogram
                       </div>
-                      <div className="rounded-2xl border border-neutral-200 bg-white p-3">
-                        <div className="text-sm font-medium mb-2">
-                          DL histogram
-                        </div>
-                        {plots.dl ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              plots.dl && openLightbox(plots.dl, "DL histogram")
-                            }
-                            className="block w-full cursor-zoom-in"
-                            aria-label="Open DL histogram"
-                          >
-                            <img
-                              src={plots.dl}
-                              alt="DL histogram"
-                              className="w-full h-[260px] object-contain rounded-xl bg-[#F9FAFB] border border-neutral-100"
-                            />
-                          </button>
-                        ) : (
-                          <div className="h-[260px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
-                            No plot yet
-                          </div>
-                        )}
+                      <div className="h-[300px]">
+                        <Plot
+                          data={plotlyPlots.original_histogram.data}
+                          layout={{
+                            ...plotlyPlots.original_histogram.layout,
+                            autosize: true,
+                            margin: { l: 60, r: 20, t: 60, b: 60 },
+                          }}
+                          config={{ responsive: true, displaylogo: false }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
                       </div>
-                      <div className="rounded-2xl border border-neutral-200 bg-white p-3">
-                        <div className="text-sm font-medium mb-2">
-                          QQ plot (log–log)
-                        </div>
-                        {plots.qq ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              plots.qq &&
-                              openLightbox(plots.qq, "QQ plot (log–log)")
-                            }
-                            className="block w-full cursor-zoom-in"
-                            aria-label="Open QQ plot"
-                          >
-                            <img
-                              src={plots.qq}
-                              alt="QQ plot"
-                              className="w-full h-[260px] object-contain rounded-xl bg-[#F9FAFB] border border-neutral-100"
-                            />
-                          </button>
-                        ) : (
-                          <div className="h-[260px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
-                            No plot yet
-                          </div>
-                        )}
+                    </div>
+                    <div className="rounded-2xl border border-neutral-200 bg-white p-3">
+                      <div className="text-sm font-medium mb-2">
+                        DL histogram
                       </div>
-                    </section>
-                  )}
+                      <div className="h-[300px]">
+                        <Plot
+                          data={plotlyPlots.dl_histogram.data}
+                          layout={{
+                            ...plotlyPlots.dl_histogram.layout,
+                            autosize: true,
+                            margin: { l: 60, r: 20, t: 60, b: 60 },
+                          }}
+                          config={{ responsive: true, displaylogo: false }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-neutral-200 bg-white p-3">
+                      <div className="text-sm font-medium mb-2">
+                        QQ plot (log–log)
+                      </div>
+                      <div className="h-[300px]">
+                        <Plot
+                          data={plotlyPlots.qq_plot.data}
+                          layout={{
+                            ...plotlyPlots.qq_plot.layout,
+                            autosize: true,
+                            margin: { l: 60, r: 20, t: 60, b: 60 },
+                          }}
+                          config={{ responsive: true, displaylogo: false }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
+                      </div>
+                    </div>
+                  </section>
+                )}
               </section>
 
               <section className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1389,54 +1179,6 @@ export default function ESRI3DComparisonApp() {
 
         <footer className="mx-auto max-w-6xl px-4 pb-10 pt-6 text-xs text-neutral-500" />
       </div>
-
-      {/* Lightbox modal */}
-      <AnimatePresence>
-        {lightboxOpen && lightboxSrc && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm"
-            onClick={closeLightbox}
-            aria-modal="true"
-            role="dialog"
-          >
-            <div
-              className="absolute inset-0 flex items-center justify-center p-4"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                transition={{ type: "spring", stiffness: 240, damping: 24 }}
-                className="relative w-full max-w-6xl"
-              >
-                <div className="mb-2 flex items-center justify-between text-white">
-                  <h3 className="text-sm md:text-base font-medium">
-                    {lightboxTitle}
-                  </h3>
-                  <button
-                    onClick={closeLightbox}
-                    className="inline-flex items-center rounded-xl bg-white/10 hover:bg-white/20 px-2 py-1"
-                    aria-label="Close"
-                  >
-                    <X className="h-5 w-5 text-white" />
-                  </button>
-                </div>
-                <div className="rounded-2xl bg-white p-2 md:p-3">
-                  <img
-                    src={lightboxSrc}
-                    alt={lightboxTitle}
-                    className="max-h-[80vh] w-full object-contain rounded-xl"
-                  />
-                </div>
-              </motion.div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -1722,7 +1464,7 @@ function ControlsBar(props: {
     { value: "max", label: "Max" },
   ] as const;
 
-  const tabRefs = React.useRef<any[]>([]);
+  const tabRefs = React.useRef<(HTMLButtonElement | null)[]>([]);
   const selectedIdx = method
     ? METHOD_OPTIONS.findIndex((o) => o.value === method)
     : -1;
@@ -1748,10 +1490,8 @@ function ControlsBar(props: {
   const [gridInput, setGridInput] = React.useState<string>(
     gridSize !== null ? String(gridSize) : ""
   );
-  const isInvalidGridLow =
-    gridInput !== "" && Number(gridInput) < minGrid;
-  const isInvalidGridHigh =
-    gridInput !== "" && Number(gridInput) > maxGrid;
+  const isInvalidGridLow = gridInput !== "" && Number(gridInput) < minGrid;
+  const isInvalidGridHigh = gridInput !== "" && Number(gridInput) > maxGrid;
   const isInvalidGrid = isInvalidGridLow || isInvalidGridHigh;
 
   React.useEffect(() => {
@@ -1793,7 +1533,9 @@ function ControlsBar(props: {
               return (
                 <button
                   key={opt.value}
-                  ref={(el) => (tabRefs.current[idx] = el)}
+                  ref={(el) => {
+                    tabRefs.current[idx] = el;
+                  }}
                   type="button"
                   role="tab"
                   aria-selected={active}
@@ -1826,7 +1568,9 @@ function ControlsBar(props: {
                 max={maxGrid}
                 step={stepGrid}
                 value={
-                  gridSize !== null && gridSize >= minGrid && gridSize <= maxGrid
+                  gridSize !== null &&
+                  gridSize >= minGrid &&
+                  gridSize <= maxGrid
                     ? gridSize
                     : minGrid
                 }
@@ -1861,7 +1605,7 @@ function ControlsBar(props: {
                     background: "transparent",
                     fontSize: "13px",
                     whiteSpace: "nowrap",
-                    marginLeft: "2px"
+                    marginLeft: "2px",
                   }}
                 >
                   {isInvalidGridLow
@@ -1869,8 +1613,10 @@ function ControlsBar(props: {
                     : `Enter value below ${maxGrid}`}
                 </div>
               )}
-              <span className="text-sm font-medium"
-                style={{ color: isInvalidGrid ? "#dc2626" : "#374151" }}>
+              <span
+                className="text-sm font-medium"
+                style={{ color: isInvalidGrid ? "#dc2626" : "#374151" }}
+              >
                 {gridInput !== "" ? `${gridInput} m` : "-- m"}
               </span>
             </div>

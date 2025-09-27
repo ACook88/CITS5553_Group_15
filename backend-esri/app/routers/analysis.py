@@ -50,6 +50,11 @@ class PlotsResponse(BaseModel):
     dl_png: str
     qq_png: str
 
+class PlotlyPlotsResponse(BaseModel):
+    original_histogram: dict  # Plotly data for original histogram
+    dl_histogram: dict  # Plotly data for DL histogram
+    qq_plot: dict  # Plotly data for QQ plot
+
 def _clean_series(df: pd.DataFrame, assay_col: str) -> pd.Series:
     if assay_col not in df.columns:
         raise ValueError(f"Column '{assay_col}' not found")
@@ -119,6 +124,112 @@ async def plots(
         qq_png = _fig_to_b64(fig3)
 
         return {"original_png": original_png, "dl_png": dl_png, "qq_png": qq_png}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/plots-plotly", response_model=PlotlyPlotsResponse)
+async def plots_plotly(
+    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
+    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
+    original_assay: str  = Form(...),
+    dl_assay: str        = Form(...),
+):
+    try:
+        # read only the assay columns (fast)
+        df_o = dataframe_from_upload_cols(original, [original_assay])
+        df_d = dataframe_from_upload_cols(dl, [dl_assay])
+
+        s_o = _clean_series(df_o, original_assay)
+        s_d = _clean_series(df_d, dl_assay)
+
+        # Original Histogram (log-spaced bins)
+        bins_o = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
+        hist_o, bin_edges_o = np.histogram(s_o, bins=bins_o)
+        bin_centers_o = (bin_edges_o[:-1] + bin_edges_o[1:]) / 2
+        
+        original_histogram = {
+            "data": [{
+                "x": bin_centers_o.tolist(),
+                "y": hist_o.tolist(),
+                "type": "bar",
+                "marker": {"color": "#7C3AED", "line": {"color": "black", "width": 1}},
+                "name": f"Original {original_assay}"
+            }],
+            "layout": {
+                "title": f"Original {original_assay} Distribution",
+                "xaxis": {"title": original_assay, "type": "log"},
+                "yaxis": {"title": "Count"},
+                "showlegend": False,
+                "margin": {"l": 60, "r": 20, "t": 60, "b": 60}
+            }
+        }
+
+        # DL Histogram (log-spaced bins)
+        bins_d = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
+        hist_d, bin_edges_d = np.histogram(s_d, bins=bins_d)
+        bin_centers_d = (bin_edges_d[:-1] + bin_edges_d[1:]) / 2
+        
+        dl_histogram = {
+            "data": [{
+                "x": bin_centers_d.tolist(),
+                "y": hist_d.tolist(),
+                "type": "bar",
+                "marker": {"color": "#7C3AED", "line": {"color": "black", "width": 1}},
+                "name": f"DL {dl_assay}"
+            }],
+            "layout": {
+                "title": f"DL {dl_assay} Distribution",
+                "xaxis": {"title": dl_assay, "type": "log"},
+                "yaxis": {"title": "Count"},
+                "showlegend": False,
+                "margin": {"l": 60, "r": 20, "t": 60, "b": 60}
+            }
+        }
+
+        # QQ plot (log–log)
+        q = np.linspace(0.01, 0.99, 50)
+        qo = np.quantile(s_o, q)
+        qd = np.quantile(s_d, q)
+        
+        # Create reference line
+        min_val = min(qo.min(), qd.min())
+        max_val = max(qo.max(), qd.max())
+        line_x = np.linspace(min_val, max_val, 100)
+        line_y = line_x
+        
+        qq_plot = {
+            "data": [
+                {
+                    "x": qo.tolist(),
+                    "y": qd.tolist(),
+                    "type": "scatter",
+                    "mode": "markers",
+                    "marker": {"size": 8, "color": "#7C3AED"},
+                    "name": "Data points"
+                },
+                {
+                    "x": line_x.tolist(),
+                    "y": line_y.tolist(),
+                    "type": "scatter",
+                    "mode": "lines",
+                    "line": {"dash": "dash", "color": "black", "width": 1},
+                    "name": "Reference line (y=x)"
+                }
+            ],
+            "layout": {
+                "title": "QQ Plot (log–log): Original vs DL",
+                "xaxis": {"title": f"Original {original_assay} quantiles", "type": "log"},
+                "yaxis": {"title": f"DL {dl_assay} quantiles", "type": "log"},
+                "showlegend": True,
+                "margin": {"l": 60, "r": 20, "t": 60, "b": 60}
+            }
+        }
+
+        return {
+            "original_histogram": original_histogram,
+            "dl_histogram": dl_histogram,
+            "qq_plot": qq_plot
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
