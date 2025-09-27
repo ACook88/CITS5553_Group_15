@@ -1740,9 +1740,41 @@ function ControlsBar(props: {
     }
   }
 
-  const minGrid = 1000, // changed from 100 to 1000
+  const minGrid = 1000,
     maxGrid = 900000,
     stepGrid = 50;
+
+  // Track invalid input state for grid cell size
+  const [gridInput, setGridInput] = React.useState<string>(
+    gridSize !== null ? String(gridSize) : ""
+  );
+  const isInvalidGridLow =
+    gridInput !== "" && Number(gridInput) < minGrid;
+  const isInvalidGridHigh =
+    gridInput !== "" && Number(gridInput) > maxGrid;
+  const isInvalidGrid = isInvalidGridLow || isInvalidGridHigh;
+
+  React.useEffect(() => {
+    // Sync input box with gridSize changes from slider
+    if (gridSize !== null && String(gridSize) !== gridInput) {
+      setGridInput(String(gridSize));
+    }
+    if (gridSize === null && gridInput !== "") {
+      setGridInput("");
+    }
+  }, [gridSize]);
+
+  function handleGridInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const val = e.target.value;
+    setGridInput(val);
+    if (val === "") {
+      onGridSizeChange(null);
+      return;
+    }
+    const num = Number(val);
+    if (isNaN(num)) return;
+    onGridSizeChange(num);
+  }
 
   return (
     <section className="mt-6 rounded-2xl border border-neutral-200 bg-white p-4 md:p-5">
@@ -1793,28 +1825,53 @@ function ControlsBar(props: {
                 min={minGrid}
                 max={maxGrid}
                 step={stepGrid}
-                value={gridSize ?? minGrid}
-                onChange={(e) => onGridSizeChange(Number(e.target.value))}
+                value={
+                  gridSize !== null && gridSize >= minGrid && gridSize <= maxGrid
+                    ? gridSize
+                    : minGrid
+                }
+                onChange={(e) => {
+                  setGridInput(e.target.value);
+                  onGridSizeChange(Number(e.target.value));
+                }}
                 className="w-40"
               />
-              <input
-                type="number"
-                min={minGrid}
-                max={maxGrid}
-                step={stepGrid}
-                value={gridSize ?? ""}
-                onChange={(e) => {
-                  const v =
-                    e.target.value === "" ? null : Number(e.target.value);
-                  if (v === null) onGridSizeChange(null);
-                  else
-                    onGridSizeChange(Math.max(minGrid, Math.min(maxGrid, v)));
-                }}
-                placeholder={`${minGrid}-${maxGrid}`}
-                className="h-9 w-24 rounded-lg border border-neutral-300 px-2 text-sm"
-              />
-              <span className="text-sm text-neutral-700 font-medium">
-                {gridSize !== null ? `${gridSize} m` : "-- m"}
+              <div className="relative">
+                <input
+                  type="number"
+                  min={0}
+                  max={maxGrid}
+                  step={stepGrid}
+                  value={gridInput}
+                  onChange={handleGridInputChange}
+                  placeholder={`${minGrid}-${maxGrid}`}
+                  className={
+                    "h-9 w-24 rounded-lg border px-2 text-sm " +
+                    (isInvalidGrid
+                      ? "border-red-500 text-red-600 bg-red-50"
+                      : "border-neutral-300")
+                  }
+                />
+              </div>
+              {(isInvalidGridLow || isInvalidGridHigh) && (
+                <div
+                  className="mt-1 text-xs font-medium"
+                  style={{
+                    color: "#dc2626",
+                    background: "transparent",
+                    fontSize: "13px",
+                    whiteSpace: "nowrap",
+                    marginLeft: "2px"
+                  }}
+                >
+                  {isInvalidGridLow
+                    ? `Enter value above ${minGrid}`
+                    : `Enter value below ${maxGrid}`}
+                </div>
+              )}
+              <span className="text-sm font-medium"
+                style={{ color: isInvalidGrid ? "#dc2626" : "#374151" }}>
+                {gridInput !== "" ? `${gridInput} m` : "-- m"}
               </span>
             </div>
           </div>
