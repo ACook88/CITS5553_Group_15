@@ -10,6 +10,8 @@ from app.services.io_service import dataframe_from_upload, dataframe_from_upload
 from pydantic import BaseModel
 from app.services.comparisons import COMPARISON_METHODS
 from pyproj import Transformer 
+from fastapi.responses import StreamingResponse
+import io
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
@@ -323,4 +325,271 @@ async def comparison(
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/export/heatmaps")
+async def export_heatmaps(
+    original: UploadFile = File(...),
+    dl: UploadFile = File(...),
+    original_assay: str = Form(...),
+    dl_assay: str = Form(...),
+):
+    try:
+        # ...existing code to read and clean data...
+        df_o = dataframe_from_upload_cols(original, [original_assay])
+        df_d = dataframe_from_upload_cols(dl, [dl_assay])
+        s_o = pd.to_numeric(df_o[original_assay], errors="coerce").dropna()
+        s_o = s_o[s_o > 0]
+        s_d = pd.to_numeric(df_d[dl_assay], errors="coerce").dropna()
+        s_d = s_d[s_d > 0]
+
+        # Generate all 3 heatmap images as PNGs
+        images = []
+        # Original heatmap
+        fig1 = plt.figure(figsize=(7,4))
+        ax1 = fig1.add_subplot(111)
+        bins_o = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
+        ax1.hist(s_o, bins=bins_o, color="#7C3AED", edgecolor="black")
+        ax1.set_xscale("log")
+        ax1.set_title(f"Original {original_assay} Distribution")
+        ax1.set_xlabel(original_assay)
+        ax1.set_ylabel("Count")
+        buf1 = io.BytesIO()
+        fig1.tight_layout()
+        fig1.savefig(buf1, format="png", dpi=120)
+        plt.close(fig1)
+        buf1.seek(0)
+        images.append(("original_heatmap.png", buf1.read()))
+
+        # DL heatmap
+        fig2 = plt.figure(figsize=(7,4))
+        ax2 = fig2.add_subplot(111)
+        bins_d = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
+        ax2.hist(s_d, bins=bins_d, color="#7C3AED", edgecolor="black")
+        ax2.set_xscale("log")
+        ax2.set_title(f"DL {dl_assay} Distribution")
+        ax2.set_xlabel(dl_assay)
+        ax2.set_ylabel("Count")
+        buf2 = io.BytesIO()
+        fig2.tight_layout()
+        fig2.savefig(buf2, format="png", dpi=120)
+        plt.close(fig2)
+        buf2.seek(0)
+        images.append(("dl_heatmap.png", buf2.read()))
+
+        # QQ plot
+        q = np.linspace(0.01, 0.99, 50)
+        qo = np.quantile(s_o, q)
+        qd = np.quantile(s_d, q)
+        fig3 = plt.figure(figsize=(6,6))
+        ax3 = fig3.add_subplot(111)
+        ax3.scatter(qo, qd, s=20, color="#7C3AED")
+        line = np.linspace(min(qo.min(), qd.min()), max(qo.max(), qd.max()), 100)
+        ax3.plot(line, line, "--", linewidth=1)
+        ax3.set_xscale("log"); ax3.set_yscale("log")
+        ax3.set_title("QQ Plot (log–log): Original vs DL")
+        ax3.set_xlabel(f"Original {original_assay} quantiles")
+        ax3.set_ylabel(f"DL {dl_assay} quantiles")
+        buf3 = io.BytesIO()
+        fig3.tight_layout()
+        fig3.savefig(buf3, format="png", dpi=120)
+        plt.close(fig3)
+        buf3.seek(0)
+        images.append(("qqplot.png", buf3.read()))
+
+        # Create a zip file in memory
+        import zipfile
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            for fname, data in images:
+                zf.writestr(fname, data)
+        zip_buf.seek(0)
+        return StreamingResponse(zip_buf, media_type="application/zip", headers={
+            "Content-Disposition": "attachment; filename=heatmaps.zip"
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/export/plots")
+async def export_plots(
+    original_file: UploadFile = File(...),
+    dl_file: UploadFile = File(...),
+    original_assay: str = Form(...),
+    dl_assay: str = Form(...),
+    selected_plots: str = Form(...)  # JSON string of selected plots
+):
+    """Export selected plots as PNG files in a zip"""
+    try:
+        import json
+        import zipfile
+        import io
+        
+        # Parse selected plots
+        plots_to_export = json.loads(selected_plots)
+        
+        # Generate plots data
+        plot_data = await plots_data(original_file, dl_file, original_assay, dl_assay)
+        
+        images = []
+        
+        # Generate histogram plots
+        if plots_to_export.get('originalHistogram', False):
+            fig = create_histogram_plot(plot_data['original_data'], f"Original {original_assay} Distribution")
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
+            img_buf.seek(0)
+            images.append(("original_histogram.png", img_buf.getvalue()))
+        
+        if plots_to_export.get('dlHistogram', False):
+            fig = create_histogram_plot(plot_data['dl_data'], f"DL {dl_assay} Distribution")
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
+            img_buf.seek(0)
+            images.append(("dl_histogram.png", img_buf.getvalue()))
+        
+        # Generate QQ plot
+        if plots_to_export.get('qqPlot', False):
+            fig = create_qq_plot(plot_data['qq_data'], "QQ Plot (log-log)")
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format='png', dpi=300, bbox_inches='tight')
+            img_buf.seek(0)
+            images.append(("qq_plot.png", img_buf.getvalue()))
+        
+        if not images:
+            raise HTTPException(status_code=400, detail="No plots selected for export")
+        
+        # Create zip file
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            for fname, data in images:
+                zf.writestr(fname, data)
+        zip_buf.seek(0)
+        
+        return StreamingResponse(zip_buf, media_type="application/zip", headers={
+            "Content-Disposition": "attachment; filename=plots.zip"
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/export/grid-csv")
+async def export_grid_csv(
+    original_file: UploadFile = File(...),
+    dl_file: UploadFile = File(...),
+    original_northing: str = Form(...),
+    original_easting: str = Form(...),
+    original_assay: str = Form(...),
+    dl_northing: str = Form(...),
+    dl_easting: str = Form(...),
+    dl_assay: str = Form(...),
+    method: str = Form(...),
+    grid_size: int = Form(...)
+):
+    """Export grid data as CSV"""
+    try:
+        # Run comparison to get grid data
+        grid_out = await run_comparison(
+            original_file, dl_file,
+            {
+                "oN": original_northing,
+                "oE": original_easting,
+                "oA": original_assay,
+                "dN": dl_northing,
+                "dE": dl_easting,
+                "dA": dl_assay,
+            },
+            method, grid_size
+        )
+        
+        # Convert grid data to CSV
+        import pandas as pd
+        import io
+        
+        # Create grid coordinates
+        x_coords, y_coords = np.meshgrid(grid_out['x'], grid_out['y'])
+        
+        # Flatten data for CSV
+        data = {
+            'x': x_coords.flatten(),
+            'y': y_coords.flatten(),
+            'original': np.array(grid_out['orig']).flatten(),
+            'dl': np.array(grid_out['dl']).flatten(),
+            'comparison': np.array(grid_out['cmp']).flatten()
+        }
+        
+        df = pd.DataFrame(data)
+        
+        # Create CSV
+        csv_buf = io.StringIO()
+        df.to_csv(csv_buf, index=False)
+        csv_content = csv_buf.getvalue()
+        
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=grid_data.csv"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def create_histogram_plot(data: dict, title: str):
+    """Create histogram plot for export"""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Create histogram using the bin data from the plot data
+    if 'bin_edges' in data and data['bin_edges']:
+        bins = data['bin_edges']
+        # Use the values array for histogram
+        values = data.get('values', [])
+        if values:
+            ax.hist(values, bins=bins, alpha=0.7, color='#7C3AED', edgecolor='black', linewidth=0.5)
+        else:
+            # Fallback: create histogram from x, y data
+            bin_centers = data['x']
+            counts = data['y']
+            bin_widths = np.diff(bins) if len(bins) > 1 else [1]
+            ax.bar(bin_centers, counts, width=bin_widths, alpha=0.7, color='#7C3AED', edgecolor='black', linewidth=0.5)
+    else:
+        # Fallback: create histogram from x, y data
+        bin_centers = data['x']
+        counts = data['y']
+        bin_widths = np.diff(bin_centers) if len(bin_centers) > 1 else [1]
+        ax.bar(bin_centers, counts, width=bin_widths, alpha=0.7, color='#7C3AED', edgecolor='black', linewidth=0.5)
+    
+    ax.set_xscale('log')
+    ax.set_xlabel(data['xlabel'])
+    ax.set_ylabel(data['ylabel'])
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_qq_plot(data: dict, title: str):
+    """Create QQ plot for export"""
+    import matplotlib.pyplot as plt
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot data points
+    ax.scatter(data['x'], data['y'], alpha=0.6, color='#7C3AED', s=20)
+    
+    # Plot reference line
+    if data.get('line_x') and data.get('line_y'):
+        ax.plot(data['line_x'], data['line_y'], 'k--', alpha=0.8, linewidth=1)
+    
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel(data['xlabel'])
+    ax.set_ylabel(data['ylabel'])
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
 

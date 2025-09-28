@@ -83,7 +83,7 @@ export type PlotsDataResponse = {
   original_data: PlotData;
   dl_data: PlotData;
   qq_data: PlotData;
-}; 
+};
 
 export async function runPlotsData(
   originalFile: File,
@@ -143,4 +143,70 @@ export async function runComparison(
     throw new Error(err?.detail ?? `Comparison failed (${res.status})`);
   }
   return res.json();
+}
+
+export async function exportPlots(
+  originalFile: File,
+  dlFile: File,
+  originalAssay: string,
+  dlAssay: string,
+  selectedPlots: Record<string, boolean>
+): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("original_file", originalFile);
+  formData.append("dl_file", dlFile);
+  formData.append("original_assay", originalAssay);
+  formData.append("dl_assay", dlAssay);
+  formData.append("selected_plots", JSON.stringify(selectedPlots));
+
+  const response = await fetch(`${API}/api/analysis/export/plots`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || "Export plots failed");
+  }
+
+  return response.blob();
+}
+
+export async function exportGridCSV(
+  originalFile: File,
+  dlFile: File,
+  mapping: {
+    oN: string;
+    oE: string;
+    oA: string;
+    dN: string;
+    dE: string;
+    dA: string;
+  },
+  method: "max" | "mean" | "median",
+  gridSize: number
+): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("original_file", originalFile);
+  formData.append("dl_file", dlFile);
+  formData.append("original_northing", mapping.oN);
+  formData.append("original_easting", mapping.oE);
+  formData.append("original_assay", mapping.oA);
+  formData.append("dl_northing", mapping.dN);
+  formData.append("dl_easting", mapping.dE);
+  formData.append("dl_assay", mapping.dA);
+  formData.append("method", method);
+  formData.append("grid_size", gridSize.toString());
+
+  const response = await fetch(`${API}/api/analysis/export/grid-csv`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || "Export CSV failed");
+  }
+
+  return response.blob();
 }

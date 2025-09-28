@@ -23,7 +23,7 @@ import {
 import JSZip from "jszip";
 import * as THREE from "three";
 import { fetchColumns } from "./api/data";
-import { runSummary, runPlotsData, runComparison, type PlotData } from "./api/analysis";
+import { runSummary, runPlotsData, runComparison, exportPlots, exportGridCSV, type PlotData } from "./api/analysis";
 import Plot from "react-plotly.js";
 
 const isAcceptedName = (name: string) => {
@@ -148,6 +148,25 @@ export default function ESRI3DComparisonApp() {
 
   // Export after 1,2,4 chosen
   const exportEnabled = !!originalZip && !!dlZip && method !== null;
+
+  // Plot selection state for export
+  const [selectedPlots, setSelectedPlots] = useState<{
+    originalHistogram: boolean;
+    dlHistogram: boolean;
+    qqPlot: boolean;
+    originalHeatmap: boolean;
+    dlHeatmap: boolean;
+    comparisonHeatmap: boolean;
+  }>({
+    originalHistogram: false,
+    dlHistogram: false,
+    qqPlot: false,
+    originalHeatmap: false,
+    dlHeatmap: false,
+    comparisonHeatmap: false,
+  });
+
+  const [showPlotSelection, setShowPlotSelection] = useState(false);
 
   // Ready to run comparison (full pipeline)
   const readyToRun =
@@ -497,13 +516,123 @@ export default function ESRI3DComparisonApp() {
     }
   }
 
-  async function onExport(type: "png" | "csv") {
+  // Plot selection helpers
+  const plotOptions = [
+    { key: 'originalHistogram', label: 'Original Histogram' },
+    { key: 'dlHistogram', label: 'DL Histogram' },
+    { key: 'qqPlot', label: 'QQ Plot' },
+    { key: 'originalHeatmap', label: 'Original Heatmap' },
+    { key: 'dlHeatmap', label: 'DL Heatmap' },
+    { key: 'comparisonHeatmap', label: 'Comparison Heatmap' },
+  ];
+
+  const handlePlotSelection = (plotKey: string, checked: boolean) => {
+    setSelectedPlots(prev => ({
+      ...prev,
+      [plotKey]: checked
+    }));
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    setSelectedPlots({
+      originalHistogram: checked,
+      dlHistogram: checked,
+      qqPlot: checked,
+      originalHeatmap: checked,
+      dlHeatmap: checked,
+      comparisonHeatmap: checked,
+    });
+  };
+
+  const isAllSelected = Object.values(selectedPlots).every(Boolean);
+  const hasAnySelection = Object.values(selectedPlots).some(Boolean);
+
+  async function onExport(type: "plots" | "csv") {
     if (!runId) {
       alert("Nothing to export yet. Please run a comparison first.");
       return;
     }
-    alert(`Exporting ${type.toUpperCase()}… (wire to backend)`);
+    
+    if (type === "plots") {
+      setShowPlotSelection(true);
+    } else if (type === "csv") {
+      await handleExportCSV();
+    }
   }
+
+  const handleExportCSV = async () => {
+    if (!originalZip || !dlZip || !method || !gridSize) {
+      alert("Missing required data for CSV export");
+      return;
+    }
+
+    try {
+      const mapping = {
+        oN: originalMap["Northing"]!,
+        oE: originalMap["Easting"]!,
+        oA: originalMap["Assay"]!,
+        dN: dlMap["Northing"]!,
+        dE: dlMap["Easting"]!,
+        dA: dlMap["Assay"]!,
+      };
+
+      const blob = await exportGridCSV(
+        originalZip,
+        dlZip,
+        mapping,
+        method,
+        gridSize
+      );
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'grid_data.csv';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      setToast({ msg: "Grid data exported successfully!" });
+    } catch (error: any) {
+      console.error("CSV export failed:", error);
+      alert(`CSV export failed: ${error.message}`);
+    }
+  };
+
+  const handleExportPlots = async () => {
+    if (!originalZip || !dlZip || !originalMap.Assay || !dlMap.Assay) {
+      alert("Missing required data for export");
+      return;
+    }
+
+    try {
+      const blob = await exportPlots(
+        originalZip,
+        dlZip,
+        originalMap.Assay,
+        dlMap.Assay,
+        selectedPlots
+      );
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'plots.zip';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      setShowPlotSelection(false);
+      setToast({ msg: "Plots exported successfully!" });
+    } catch (error: any) {
+      console.error("Export failed:", error);
+      alert(`Export failed: ${error.message}`);
+    }
+  };
 
   // --- Reset helpers ---
   function resetDataLoading() {
@@ -530,6 +659,15 @@ export default function ESRI3DComparisonApp() {
     setStatsDl(null);
     setPlotsData({}); // <-- clear plots data state as well
     setPlotsLoading(false); // <-- reset loading state for plots
+    setSelectedPlots({
+      originalHistogram: false,
+      dlHistogram: false,
+      qqPlot: false,
+      originalHeatmap: false,
+      dlHeatmap: false,
+      comparisonHeatmap: false,
+    });
+    setShowPlotSelection(false);
     resetComparison();
   }
   function resetComparison() {
@@ -1268,9 +1406,9 @@ export default function ESRI3DComparisonApp() {
                       : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                   }
                   disabled={!exportEnabled}
-                  onClick={() => onExport("png")}
+                  onClick={() => onExport("plots")}
                 >
-                  Export Heatmap PNG
+                  Export Plots
                 </button>
                 <button
                   className={
@@ -1288,6 +1426,76 @@ export default function ESRI3DComparisonApp() {
               <p className="text-xs text-neutral-500 mt-3">
                 Buttons enable after the first 3 steps.
               </p>
+
+              {/* Plot Selection Modal */}
+              {showPlotSelection && (
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                  <div className="bg-white rounded-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold">Select Plots to Export</h3>
+                      <button
+                        onClick={() => setShowPlotSelection(false)}
+                        className="text-neutral-500 hover:text-neutral-700"
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      {/* Select All checkbox */}
+                      <div className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200">
+                        <input
+                          type="checkbox"
+                          id="select-all"
+                          checked={isAllSelected}
+                          onChange={(e) => handleSelectAll(e.target.checked)}
+                          className="h-4 w-4 text-[#7C3AED] focus:ring-[#7C3AED] border-neutral-300 rounded"
+                        />
+                        <label htmlFor="select-all" className="text-sm font-medium text-neutral-700">
+                          Select All
+                        </label>
+                      </div>
+
+                      {/* Individual plot checkboxes */}
+                      {plotOptions.map((option) => (
+                        <div key={option.key} className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200">
+                          <input
+                            type="checkbox"
+                            id={option.key}
+                            checked={selectedPlots[option.key as keyof typeof selectedPlots]}
+                            onChange={(e) => handlePlotSelection(option.key, e.target.checked)}
+                            className="h-4 w-4 text-[#7C3AED] focus:ring-[#7C3AED] border-neutral-300 rounded"
+                          />
+                          <label htmlFor={option.key} className="text-sm text-neutral-700">
+                            {option.label}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex gap-3 mt-6">
+                      <button
+                        onClick={() => setShowPlotSelection(false)}
+                        className="flex-1 rounded-xl px-4 py-2 text-sm font-medium bg-neutral-200 text-neutral-700 hover:bg-neutral-300 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleExportPlots}
+                        disabled={!hasAnySelection}
+                        className={
+                          "flex-1 rounded-xl px-4 py-2 text-sm font-medium transition " +
+                          (hasAnySelection
+                            ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
+                            : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
+                        }
+                      >
+                        Export Selected
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </section>
           )}
 
