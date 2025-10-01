@@ -1,613 +1,373 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import Dict, Literal, Tuple
-import base64
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
+# backend-esri/app/routers/analysis.py
+# FastAPI router for analysis endpoints (summary, plots, comparison, export)
+# Key fix: run_comparison aligns rows USING THE USER-SELECTED COORDINATE COLUMNS
+# instead of assuming SAMPLEID. If SAMPLEID happens to overlap, it will use it.
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Body, Form
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, Tuple
 import pandas as pd
-from app.services.io_service import dataframe_from_upload, dataframe_from_upload_cols  # NEW
-from pydantic import BaseModel
-from app.services.comparisons import COMPARISON_METHODS
-from pyproj import Transformer 
-from fastapi.responses import StreamingResponse
+import numpy as np
 import io
+import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
-def _clean_and_stats(df: pd.DataFrame, assay_col: str) -> Dict[str, float]:
-    if assay_col not in df.columns:
-        raise ValueError(f"Column '{assay_col}' not found")
-    # coerce to numeric, drop NaNs, drop <= 0
-    s = pd.to_numeric(df[assay_col], errors="coerce").dropna()
-    s = s[s > 0]
-    if s.empty:
-        return {"count": 0, "mean": None, "median": None, "max": None, "std": None}
-    return {
-        "count": int(s.shape[0]),
-        "mean": float(s.mean()),
-        "median": float(s.median()),
-        "max": float(s.max()),
-        "std": float(s.std(ddof=1)),  # sample std
-    }
+# ------------------------------------------------------------------------------
+# Simple in-memory session store. If your project already has one (e.g., in
+# /api/data/columns), you can import and use that instead. This fallback lets
+# run_comparison work both with a run_token or with direct file uploads.
+# ------------------------------------------------------------------------------
+SESSION_STORE: Dict[str, Dict[str, pd.DataFrame]] = {}
 
-@router.post("/summary")
-async def summary(
-    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
-    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
-    original_assay: str  = Form(...),
-    dl_assay: str        = Form(...),
-):
-    try:
-        df_o = dataframe_from_upload(original)
-        df_d = dataframe_from_upload(dl)
-        stats_o = _clean_and_stats(df_o, original_assay)
-        stats_d = _clean_and_stats(df_d, dl_assay)
-        return {"original": stats_o, "dl": stats_d}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
-class PlotsResponse(BaseModel):
-    original_png: str  # base64 (no data: prefix)
-    dl_png: str
-    qq_png: str
+def put_session(token: str, orig_df: pd.DataFrame, dl_df: pd.DataFrame) -> None:
+    SESSION_STORE[token] = {"orig": orig_df, "dl": dl_df}
 
-class PlotsDataResponse(BaseModel):
-    original_data: Dict
-    dl_data: Dict
-    qq_data: Dict
 
-def _clean_series(df: pd.DataFrame, assay_col: str) -> pd.Series:
-    if assay_col not in df.columns:
-        raise ValueError(f"Column '{assay_col}' not found")
-    s = pd.to_numeric(df[assay_col], errors="coerce").dropna()
-    s = s[s > 0]
-    return s
+def get_session(token: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if token not in SESSION_STORE:
+        raise KeyError("Unknown run_token")
+    return SESSION_STORE[token]["orig"], SESSION_STORE[token]["dl"]
 
-def _fig_to_b64(fig) -> str:
-    import io
-    buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", dpi=120)
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("ascii")
 
-@router.post("/plots", response_model=PlotsResponse)
-async def plots(
-    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
-    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
-    original_assay: str  = Form(...),
-    dl_assay: str        = Form(...),
-):
-    try:
-        # read only the assay columns (fast)
-        df_o = dataframe_from_upload_cols(original, [original_assay])
-        df_d = dataframe_from_upload_cols(dl, [dl_assay])
-
-        s_o = _clean_series(df_o, original_assay)
-        s_d = _clean_series(df_d, dl_assay)
-
-        # Histogram (Original) with log-spaced bins
-        fig1 = plt.figure(figsize=(7,4))
-        ax1 = fig1.add_subplot(111)
-        bins_o = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
-        ax1.hist(s_o, bins=bins_o, color="#7C3AED", edgecolor="black")
-        ax1.set_xscale("log")
-        ax1.set_title(f"Original {original_assay} Distribution")
-        ax1.set_xlabel(original_assay)
-        ax1.set_ylabel("Count")
-        original_png = _fig_to_b64(fig1)
-
-        # Histogram (DL) with log-spaced bins
-        fig2 = plt.figure(figsize=(7,4))
-        ax2 = fig2.add_subplot(111)
-        bins_d = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
-        ax2.hist(s_d, bins=bins_d, color="#7C3AED", edgecolor="black")
-        ax2.set_xscale("log")
-        ax2.set_title(f"DL {dl_assay} Distribution")
-        ax2.set_xlabel(dl_assay)
-        ax2.set_ylabel("Count")
-        dl_png = _fig_to_b64(fig2)
-
-        # QQ plot (log–log)
-        q = np.linspace(0.01, 0.99, 50)
-        qo = np.quantile(s_o, q)
-        qd = np.quantile(s_d, q)
-        fig3 = plt.figure(figsize=(6,6))
-        ax3 = fig3.add_subplot(111)
-        ax3.scatter(qo, qd, s=20, color="#7C3AED")
-        line = np.linspace(min(qo.min(), qd.min()), max(qo.max(), qd.max()), 100)
-        ax3.plot(line, line, "--", linewidth=1)
-        ax3.set_xscale("log"); ax3.set_yscale("log")
-        ax3.set_title("QQ Plot (log–log): Original vs DL")
-        ax3.set_xlabel(f"Original {original_assay} quantiles")
-        ax3.set_ylabel(f"DL {dl_assay} quantiles")
-        qq_png = _fig_to_b64(fig3)
-
-        return {"original_png": original_png, "dl_png": dl_png, "qq_png": qq_png}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.post("/plots-data", response_model=PlotsDataResponse)
-async def plots_data(
-    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
-    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
-    original_assay: str  = Form(...),
-    dl_assay: str        = Form(...),
-):
-    try:
-        # read only the assay columns (fast)
-        df_o = dataframe_from_upload_cols(original, [original_assay])
-        df_d = dataframe_from_upload_cols(dl, [dl_assay])
-
-        s_o = _clean_series(df_o, original_assay)
-        s_d = _clean_series(df_d, dl_assay)
-
-        # Original histogram data - match matplotlib exactly
-        bins_o = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
-        hist_o, bin_edges_o = np.histogram(s_o, bins=bins_o)
-        bin_centers_o = (bin_edges_o[:-1] + bin_edges_o[1:]) / 2
-        
-        original_data = {
-            "x": bin_centers_o.tolist(),
-            "y": hist_o.tolist(),
-            "bin_edges": bin_edges_o.tolist(),
-            "title": f"Original {original_assay} Distribution",
-            "xlabel": original_assay,
-            "ylabel": "Count",
-            "log_x": True
-        }
-
-        # DL histogram data - match matplotlib exactly
-        bins_d = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
-        hist_d, bin_edges_d = np.histogram(s_d, bins=bins_d)
-        bin_centers_d = (bin_edges_d[:-1] + bin_edges_d[1:]) / 2
-        
-        dl_data = {
-            "x": bin_centers_d.tolist(),
-            "y": hist_d.tolist(),
-            "bin_edges": bin_edges_d.tolist(),
-            "title": f"DL {dl_assay} Distribution",
-            "xlabel": dl_assay,
-            "ylabel": "Count",
-            "log_x": True
-        }
-
-        # QQ plot data
-        q = np.linspace(0.01, 0.99, 50)
-        qo = np.quantile(s_o, q)
-        qd = np.quantile(s_d, q)
-        
-        # Create reference line data
-        min_val = min(qo.min(), qd.min())
-        max_val = max(qo.max(), qd.max())
-        line_x = np.logspace(np.log10(min_val), np.log10(max_val), 100)
-        line_y = line_x
-        
-        qq_data = {
-            "x": qo.tolist(),
-            "y": qd.tolist(),
-            "line_x": line_x.tolist(),
-            "line_y": line_y.tolist(),
-            "title": "QQ Plot (log–log): Original vs DL",
-            "xlabel": f"Original {original_assay} quantiles",
-            "ylabel": f"DL {dl_assay} quantiles",
-            "log_x": True,
-            "log_y": True
-        }
-
-        return {
-            "original_data": original_data,
-            "dl_data": dl_data,
-            "qq_data": qq_data
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# --- Helpers for grid comparison (replace old single-cell helpers) ---
-def _grid_meta_xy(east: pd.Series, north: pd.Series, cell_x: float, cell_y: float):
-    xmin = float(np.floor(east.min()  / cell_x) * cell_x)
-    ymin = float(np.floor(north.min() / cell_y) * cell_y)
-    nx   = int(((east.max()  - xmin) // cell_x) + 1)
-    ny   = int(((north.max() - ymin) // cell_y) + 1)
-    return xmin, ymin, nx, ny
-
-def _index_cols_xy(df: pd.DataFrame, easting: str, northing: str,
-                   xmin: float, ymin: float, cell_x: float, cell_y: float) -> pd.DataFrame:
-    df = df.copy()
-    df["grid_ix"] = ((df[easting]  - xmin) // cell_x).astype(int)
-    df["grid_iy"] = ((df[northing] - ymin) // cell_y).astype(int)
-    return df
-
-def _looks_like_degrees(east: pd.Series, north: pd.Series) -> bool:
-    return bool(east.between(-180, 180).all() and north.between(-90, 90).all())
-
-def _to_float(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    df = df.copy()
+# ------------------------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------------------------
+def _coerce_num(df: pd.DataFrame, cols) -> None:
     for c in cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna()
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-@router.post("/comparison")
-async def comparison(
-    original: UploadFile = File(...),
-    dl: UploadFile       = File(...),
-    original_northing: str = Form(...),
-    original_easting: str  = Form(...),
-    original_assay: str    = Form(...),
-    dl_northing: str       = Form(...),
-    dl_easting: str        = Form(...),
-    dl_assay: str          = Form(...),
-    method: Literal["mean","median","max"] = Form(...),
-    grid_size: float       = Form(...),
-    treat_as: Literal["auto","meters","degrees"] = Form("auto"),
-):
+
+def _read_csv_upload(upload: UploadFile) -> pd.DataFrame:
     try:
-        # 1) Read & clean
-        df_o = dataframe_from_upload_cols(original, [original_easting, original_northing, original_assay])
-        df_d = dataframe_from_upload_cols(dl,       [dl_easting,       dl_northing,       dl_assay])
-
-        df_o = _to_float(df_o, [original_easting, original_northing, original_assay])
-        df_d = _to_float(df_d, [dl_easting, dl_northing, dl_assay])
-        df_o = df_o[df_o[original_assay] > 0]
-        df_d = df_d[df_d[dl_assay] > 0]
-        if df_o.empty or df_d.empty:
-            raise ValueError("No valid rows after cleaning (assay <= 0 removed).")
-
-        # 2) Decide units, and project to meters if inputs are degrees
-        looks_deg = _looks_like_degrees(
-            pd.concat([df_o[original_easting], df_d[dl_easting]], ignore_index=True),
-            pd.concat([df_o[original_northing], df_d[dl_northing]], ignore_index=True),
-        )
-        use_degrees = (treat_as == "degrees") or (treat_as == "auto" and looks_deg)
-
-        if use_degrees:
-            # Project lon/lat (EPSG:4326) → meters (EPSG:3577)
-            transformer = Transformer.from_crs("EPSG:4326", "EPSG:3577", always_xy=True)
-            ex_o, ny_o = transformer.transform(df_o[original_easting].values, df_o[original_northing].values)
-            ex_d, ny_d = transformer.transform(df_d[dl_easting].values,       df_d[dl_northing].values)
-            df_o["__E_m"], df_o["__N_m"] = ex_o, ny_o
-            df_d["__E_m"], df_d["__N_m"] = ex_d, ny_d
-            e_col_o, n_col_o = "__E_m", "__N_m"
-            e_col_d, n_col_d = "__E_m", "__N_m"
-            coord_units = "meters"
-        else:
-            # Already meters
-            e_col_o, n_col_o = original_easting, original_northing
-            e_col_d, n_col_d = dl_easting,       dl_northing
-            coord_units = "meters"
-
-        # 3) Grid meta (meters)
-        cell_x = cell_y = float(grid_size)
-        e_all = pd.concat([df_o[e_col_o], df_d[e_col_d]], ignore_index=True)
-        n_all = pd.concat([df_o[n_col_o], df_d[n_col_d]], ignore_index=True)
-        xmin, ymin, nx, ny = _grid_meta_xy(e_all, n_all, cell_x, cell_y)
-
-        # 4) Index + rename assay → Te_ppm
-        o_idx = _index_cols_xy(df_o, e_col_o, n_col_o, xmin, ymin, cell_x, cell_y)\
-                  .rename(columns={original_assay: "Te_ppm"})
-        d_idx = _index_cols_xy(df_d, e_col_d, n_col_d, xmin, ymin, cell_x, cell_y)\
-                  .rename(columns={dl_assay: "Te_ppm"})
-
-        # 5) Compute arrays via registry
-        fn = COMPARISON_METHODS[method]
-        arr_orig, arr_dl, arr_cmp = fn(d_idx, o_idx, nx, ny)
-
-        # 6) Downsample overlay points (in meters)
-        def _downsample(df, n=5000):
-            return df.sample(n=min(n, len(df)), random_state=42)
-        o_pts = _downsample(o_idx)[[e_col_o, n_col_o]].values.tolist()
-        d_pts = _downsample(d_idx)[[e_col_d, n_col_d]].values.tolist()
-
-        # 7) Grid centers (meters)
-        x = (xmin + (np.arange(nx) + 0.5) * cell_x).tolist()
-        y = (ymin + (np.arange(ny) + 0.5) * cell_y).tolist()
-
-        # 8) JSON-safe arrays
-        def _to_jsonable(a: np.ndarray):
-            return [[(float(v) if np.isfinite(v) else None) for v in row] for row in a]
-
-        return {
-            "nx": nx, "ny": ny,
-            "xmin": float(xmin), "ymin": float(ymin),
-            "cell": float(grid_size),
-            "cell_x": float(cell_x),
-            "cell_y": float(cell_y),
-            "x": x, "y": y,
-            "coord_units": coord_units,
-            "mean_lat": None,
-            "orig": _to_jsonable(arr_orig),
-            "dl":   _to_jsonable(arr_dl),
-            "cmp":  _to_jsonable(arr_cmp),
-            "original_points": o_pts,
-            "dl_points": d_pts,
-        }
+        raw = upload.file.read()
+        return pd.read_csv(io.BytesIO(raw))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Failed to read CSV: {e}")
 
-@router.post("/export/plots")
-async def export_plots(
-    original_file: UploadFile = File(...),
-    dl_file: UploadFile = File(...),
-    original_assay: str = Form(...),
-    dl_assay: str = Form(...),
-    selected_plots: str = Form(...),  # JSON string from the UI
-    # optional heatmap params (sent only when user selects heatmaps)
-    original_northing: str | None = Form(None),
-    original_easting: str | None = Form(None),
-    dl_northing: str | None = Form(None),
-    dl_easting: str | None = Form(None),
-    method: Literal["mean", "median", "max"] | None = Form(None),
-    grid_size: float | None = Form(None),
-):
-    """
-    Regenerates the selected plots and returns them in a ZIP.
-    Histogram + QQ use assay columns only.
-    Heatmaps reuse the same gridding logic as /comparison.
-    """
-    import io, json, zipfile
 
-    try:
-        flags = json.loads(selected_plots)  # { originalHistogram: bool, ... }
+def _sanitize_for_json(df: pd.DataFrame, n: int = 5) -> Any:
+    return df.head(n).to_dict(orient="records")
 
-        images: list[tuple[str, bytes]] = []
 
-        # ---- 1) Histograms + QQ (if requested) ----
-        if flags.get("originalHistogram") or flags.get("dlHistogram") or flags.get("qqPlot"):
-            df_o = dataframe_from_upload_cols(original_file, [original_assay])
-            df_d = dataframe_from_upload_cols(dl_file, [dl_assay])
+# ------------------------------------------------------------------------------
+# Core comparison logic (the important part)
+# ------------------------------------------------------------------------------
+def build_comparison(
+    orig_df: pd.DataFrame,
+    dl_df: pd.DataFrame,
+    *,
+    orig_x: str,
+    orig_y: str,
+    orig_val: str,
+    dl_x: str,
+    dl_y: str,
+    dl_val: str,
+    rounding: int = 6,  # 6 works for both projected (mm to cm) & lat/long (~0.1 m)
+) -> pd.DataFrame:
+    required_o = {orig_x, orig_y, orig_val}
+    required_d = {dl_x, dl_y, dl_val}
+    if not required_o.issubset(orig_df.columns):
+        missing = required_o - set(orig_df.columns)
+        raise ValueError(f"Original file missing columns: {missing}")
+    if not required_d.issubset(dl_df.columns):
+        missing = required_d - set(dl_df.columns)
+        raise ValueError(f"DL file missing columns: {missing}")
 
-            s_o = pd.to_numeric(df_o[original_assay], errors="coerce").dropna()
-            s_o = s_o[s_o > 0]
-            s_d = pd.to_numeric(df_d[dl_assay], errors="coerce").dropna()
-            s_d = s_d[s_d > 0]
+    # Optional: filter out spurious in the original set if present
+    if "SPURIOUS" in orig_df.columns:
+        orig_df = orig_df.loc[orig_df["SPURIOUS"] == 0].copy()
 
-            if flags.get("originalHistogram"):
-                fig = plt.figure(figsize=(10, 6))
-                ax = fig.add_subplot(111)
-                bins = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
-                ax.hist(s_o, bins=bins, color="#7C3AED", edgecolor="black", linewidth=0.5)
-                ax.set_xscale("log")
-                ax.set_title(f"Original {original_assay} Distribution", fontsize=14, fontweight='bold')
-                ax.set_xlabel(original_assay, fontsize=12); ax.set_ylabel("Count", fontsize=12)
-                ax.grid(True, alpha=0.3, linewidth=0.5)
-                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=150)
-                plt.close(fig); buf.seek(0)
-                images.append(("original_histogram.png", buf.read()))
+    # Coerce numeric
+    _coerce_num(orig_df, [orig_x, orig_y, orig_val])
+    _coerce_num(dl_df, [dl_x, dl_y, dl_val])
 
-            if flags.get("dlHistogram"):
-                fig = plt.figure(figsize=(10, 6))
-                ax = fig.add_subplot(111)
-                bins = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
-                ax.hist(s_d, bins=bins, color="#7C3AED", edgecolor="black", linewidth=0.5)
-                ax.set_xscale("log")
-                ax.set_title(f"DL {dl_assay} Distribution", fontsize=14, fontweight='bold')
-                ax.set_xlabel(dl_assay, fontsize=12); ax.set_ylabel("Count", fontsize=12)
-                ax.grid(True, alpha=0.3, linewidth=0.5)
-                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=150)
-                plt.close(fig); buf.seek(0)
-                images.append(("dl_histogram.png", buf.read()))
+    # Drop rows without coordinates or values
+    orig_df = orig_df.dropna(subset=[orig_x, orig_y, orig_val]).copy()
+    dl_df = dl_df.dropna(subset=[dl_x, dl_y, dl_val]).copy()
 
-            if flags.get("qqPlot"):
-                q = np.linspace(0.01, 0.99, 50)
-                qo = np.quantile(s_o, q); qd = np.quantile(s_d, q)
-                fig = plt.figure(figsize=(8, 8))
-                ax = fig.add_subplot(111)
-                ax.scatter(qo, qd, s=20, color="#7C3AED")
-                line = np.linspace(min(qo.min(), qd.min()), max(qo.max(), qd.max()), 100)
-                ax.plot(line, line, "--", linewidth=1, color="black")
-                ax.set_xscale("log"); ax.set_yscale("log")
-                ax.set_title("QQ Plot (log–log): Original vs DL", fontsize=14, fontweight='bold')
-                ax.set_xlabel(f"Original {original_assay} quantiles", fontsize=12)
-                ax.set_ylabel(f"DL {dl_assay} quantiles", fontsize=12)
-                ax.grid(True, alpha=0.3, linewidth=0.5)
-                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=150)
-                plt.close(fig); buf.seek(0)
-                images.append(("qq_plot.png", buf.read()))
+    merged = pd.DataFrame()
 
-        # ---- 2) Heatmaps (if any heatmap was requested) ----
-        if flags.get("originalHeatmap") or flags.get("dlHeatmap") or flags.get("comparisonHeatmap"):
-            # Require the mapping + grid params
-            required = [original_northing, original_easting, dl_northing, dl_easting, method, grid_size]
-            if any(v in (None, "") for v in required):
-                raise HTTPException(status_code=400, detail="Heatmaps selected but missing mapping/method/grid parameters.")
-
-            # Reuse the same data cleaning + projection + gridding as /comparison
-            # (these helpers already exist above in this file)
-            df_o = dataframe_from_upload_cols(original_file, [original_easting, original_northing, original_assay])
-            df_d = dataframe_from_upload_cols(dl_file, [dl_easting, dl_northing, dl_assay])
-
-            # clean
-            def _to_float(df, cols):
-                df = df.copy()
-                for c in cols:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-                return df.dropna()
-
-            df_o = _to_float(df_o, [original_easting, original_northing, original_assay])
-            df_d = _to_float(df_d, [dl_easting, dl_northing, dl_assay])
-            df_o = df_o[df_o[original_assay] > 0]
-            df_d = df_d[df_d[dl_assay] > 0]
-            if df_o.empty or df_d.empty:
-                raise HTTPException(status_code=400, detail="No valid rows after cleaning for heatmaps.")
-
-            # decide units and possibly project (same logic as /comparison)
-            def _looks_like_degrees(east: pd.Series, north: pd.Series) -> bool:
-                return bool(east.between(-180, 180).all() and north.between(-90, 90).all())
-
-            looks_deg = _looks_like_degrees(
-                pd.concat([df_o[original_easting], df_d[dl_easting]], ignore_index=True),
-                pd.concat([df_o[original_northing], df_d[dl_northing]], ignore_index=True),
-            )
-            use_degrees = looks_deg  # treat_as="auto"
-
-            if use_degrees:
-                transformer = Transformer.from_crs("EPSG:4326", "EPSG:3577", always_xy=True)
-                ex_o, ny_o = transformer.transform(df_o[original_easting].values, df_o[original_northing].values)
-                ex_d, ny_d = transformer.transform(df_d[dl_easting].values, df_d[dl_northing].values)
-                df_o["__E_m"], df_o["__N_m"] = ex_o, ny_o
-                df_d["__E_m"], df_d["__N_m"] = ex_d, ny_d
-                e_col_o, n_col_o = "__E_m", "__N_m"
-                e_col_d, n_col_d = "__E_m", "__N_m"
-            else:
-                e_col_o, n_col_o = original_easting, original_northing
-                e_col_d, n_col_d = dl_easting, dl_northing
-
-            # grid meta (same math as /comparison)
-            def _grid_meta_xy(east, north, cell_x, cell_y):
-                xmin = float(np.floor(east.min() / cell_x) * cell_x)
-                ymin = float(np.floor(north.min() / cell_y) * cell_y)
-                nx = int(((east.max() - xmin) // cell_x) + 1)
-                ny = int(((north.max() - ymin) // cell_y) + 1)
-                return xmin, ymin, nx, ny
-
-            cell_x = cell_y = float(grid_size)
-            xmin, ymin, nx, ny = _grid_meta_xy(
-                pd.concat([df_o[e_col_o], df_d[e_col_d]], ignore_index=True),
-                pd.concat([df_o[n_col_o], df_d[n_col_d]], ignore_index=True),
-                cell_x, cell_y
+    # If SAMPLEID overlaps (rare in your case), allow that join first
+    if "SAMPLEID" in orig_df.columns and "SAMPLEID" in dl_df.columns:
+        sid_inter = set(orig_df["SAMPLEID"]).intersection(set(dl_df["SAMPLEID"]))
+        if len(sid_inter) > 0:
+            merged = pd.merge(
+                orig_df[["SAMPLEID", orig_x, orig_y, orig_val]].rename(
+                    columns={orig_val: "orig_val"}
+                ),
+                dl_df[["SAMPLEID", dl_x, dl_y, dl_val]].rename(
+                    columns={dl_val: "dl_val"}
+                ),
+                on="SAMPLEID",
+                how="inner",
             )
 
-            # index into grid and rename assay to Te_ppm to match comparison convention
-            def _index_cols_xy(df, easting, northing, xmin, ymin, cell_x, cell_y):
-                df = df.copy()
-                df["grid_ix"] = ((df[easting] - xmin) // cell_x).astype(int)
-                df["grid_iy"] = ((df[northing] - ymin) // cell_y).astype(int)
-                return df
+    # Coordinate-based join using the columns the user selected in the UI
+    if merged.empty:
+        o = orig_df.copy()
+        d = dl_df.copy()
+        o["X_r"] = o[orig_x].round(rounding)
+        o["Y_r"] = o[orig_y].round(rounding)
+        d["X_r"] = d[dl_x].round(rounding)
+        d["Y_r"] = d[dl_y].round(rounding)
 
-            o_idx = _index_cols_xy(df_o, e_col_o, n_col_o, xmin, ymin, cell_x, cell_y).rename(columns={original_assay: "Te_ppm"})
-            d_idx = _index_cols_xy(df_d, e_col_d, n_col_d, xmin, ymin, cell_x, cell_y).rename(columns={dl_assay: "Te_ppm"})
-
-            # aggregate via registry (same as /comparison)
-            fn = COMPARISON_METHODS[method]  # type: ignore[arg-type]
-            arr_orig, arr_dl, arr_cmp = fn(d_idx, o_idx, nx, ny)
-
-            # draw heatmaps
-            x = xmin + (np.arange(nx) + 0.5) * cell_x
-            y = ymin + (np.arange(ny) + 0.5) * cell_y
-
-            # Downsample overlay points (same as interactive plots)
-            def _downsample(df, n=5000):
-                return df.sample(n=min(n, len(df)), random_state=42)
-            o_pts = _downsample(o_idx)[[e_col_o, n_col_o]].values
-            d_pts = _downsample(d_idx)[[e_col_d, n_col_d]].values
-
-            def _save_fig(fig, name):
-                b = io.BytesIO(); fig.tight_layout(pad=2.0); fig.savefig(b, format="png", dpi=150); plt.close(fig); b.seek(0)
-                images.append((name, b.read()))
-
-            if flags.get("originalHeatmap"):
-                fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
-                z = np.where(np.isfinite(arr_orig) & (arr_orig > 0), np.log10(arr_orig), np.nan)
-                im = ax.imshow(z.T, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()], 
-                              aspect="equal", cmap="viridis", vmin=-2, vmax=3)
-                # Add black dots for data points
-                ax.scatter(df_o[e_col_o], df_o[n_col_o], c='black', s=4, alpha=0.7, marker='o')
-                ax.set_title("Original (log10)", fontsize=14, fontweight='bold')
-                ax.set_xlabel("Easting (m)", fontsize=12)
-                ax.set_ylabel("Northing (m)", fontsize=12)
-                
-                # Format axes with thousands separators
-                ax.ticklabel_format(style='plain', axis='both')
-                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
-                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
-                
-                # Rotate x-axis labels to prevent overlap
-                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-                
-                # Add grid
-                ax.grid(True, alpha=0.3, linewidth=0.5)
-                
-                # Create colorbar with proper formatting
-                cbar = fig.colorbar(im, ax=ax, label=f"Max {original_assay} (log scale)")
-                cbar.set_label(f"Max {original_assay} (log scale)", fontsize=12)
-                # Set colorbar ticks to match interactive plot
-                cbar.set_ticks([-2, -1, 0, 1, 2, 3])
-                cbar.set_ticklabels(['10⁻²', '10⁻¹', '10⁰', '10¹', '10²', '10³'])
-                
-                _save_fig(fig, "original_heatmap.png")
-
-            if flags.get("dlHeatmap"):
-                fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
-                z = np.where(np.isfinite(arr_dl) & (arr_dl > 0), np.log10(arr_dl), np.nan)
-                im = ax.imshow(z.T, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()], 
-                              aspect="equal", cmap="viridis", vmin=-2, vmax=3)
-                # Add black dots for data points
-                ax.scatter(d_pts[:, 0], d_pts[:, 1], c='black', s=4, alpha=0.7, marker='o')
-                ax.set_title("DL (log10)", fontsize=14, fontweight='bold')
-                ax.set_xlabel("Easting (m)", fontsize=12)
-                ax.set_ylabel("Northing (m)", fontsize=12)
-                
-                # Format axes with thousands separators
-                ax.ticklabel_format(style='plain', axis='both')
-                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
-                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
-                
-                # Rotate x-axis labels to prevent overlap
-                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-                
-                # Add grid
-                ax.grid(True, alpha=0.3, linewidth=0.5)
-                
-                # Create colorbar with proper formatting
-                cbar = fig.colorbar(im, ax=ax, label=f"Max {dl_assay} (log scale)")
-                cbar.set_label(f"Max {dl_assay} (log scale)", fontsize=12)
-                # Set colorbar ticks to match interactive plot
-                cbar.set_ticks([-2, -1, 0, 1, 2, 3])
-                cbar.set_ticklabels(['10⁻²', '10⁻¹', '10⁰', '10¹', '10²', '10³'])
-                
-                _save_fig(fig, "dl_heatmap.png")
-
-            if flags.get("comparisonHeatmap"):
-                fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
-                vmax = 100.0
-                im = ax.imshow(arr_cmp.T, origin="lower", vmin=-vmax, vmax=vmax, cmap="RdBu_r",
-                               extent=[x.min(), x.max(), y.min(), y.max()], aspect="equal")
-                # Add black dots for both original and DL data points
-                ax.scatter(o_pts[:, 0], o_pts[:, 1], c='black', s=4, alpha=0.7, marker='o', label='Original')
-                ax.scatter(d_pts[:, 0], d_pts[:, 1], c='black', s=4, alpha=0.7, marker='o', label='DL')
-                ax.set_title("Comparison (DL − Original)", fontsize=14, fontweight='bold')
-                ax.set_xlabel("Easting (m)", fontsize=12)
-                ax.set_ylabel("Northing (m)", fontsize=12)
-                
-                # Format axes with thousands separators
-                ax.ticklabel_format(style='plain', axis='both')
-                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
-                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
-                
-                # Rotate x-axis labels to prevent overlap
-                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-                
-                # Add grid
-                ax.grid(True, alpha=0.3, linewidth=0.5)
-                
-                # Create colorbar with proper formatting
-                cbar = fig.colorbar(im, ax=ax, label="Δ Te_ppm")
-                cbar.set_label("Δ Te_ppm", fontsize=12)
-                # Set colorbar ticks to match interactive plot
-                cbar.set_ticks([-100, -75, -50, -25, 0, 25, 50, 75, 100])
-                
-                _save_fig(fig, "comparison_heatmap.png")
-
-        # ---- 3) Package everything requested into a ZIP ----
-        if not images:
-            raise HTTPException(status_code=400, detail="No plots were selected.")
-
-        zbuf = io.BytesIO()
-        with zipfile.ZipFile(zbuf, "w") as zf:
-            for fname, data in images:
-                zf.writestr(fname, data)
-        zbuf.seek(0)
-        return StreamingResponse(
-            zbuf,
-            media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=plots.zip"},
+        merged = pd.merge(
+            o[["X_r", "Y_r", orig_val]].rename(columns={orig_val: "orig_val"}),
+            d[["X_r", "Y_r", dl_val]].rename(columns={dl_val: "dl_val"}),
+            on=["X_r", "Y_r"],
+            how="inner",
         )
+
+    # Clean up and add residual
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["orig_val", "dl_val"]
+    )
+    merged["residual"] = merged["dl_val"] - merged["orig_val"]
+    return merged
+
+
+# ------------------------------------------------------------------------------
+# Request/Response models
+# ------------------------------------------------------------------------------
+class ComparisonRequest(BaseModel):
+    run_token: Optional[str] = Field(
+        None, description="Token referencing files uploaded earlier"
+    )
+    orig_x: str
+    orig_y: str
+    orig_val: str
+    dl_x: str
+    dl_y: str
+    dl_val: str
+    rounding: int = 6
+
+
+class ComparisonResponse(BaseModel):
+    n_pairs: int
+    preview: Any
+    scatter: Dict[str, Any]
+    residuals: Dict[str, Any]
+
+
+# ------------------------------------------------------------------------------
+# Endpoints
+# ------------------------------------------------------------------------------
+
+@router.post("/run_comparison", response_model=ComparisonResponse)
+def run_comparison(payload: ComparisonRequest = Body(...)) -> Any:
+    """
+    Pairs rows from the two CSVs using the columns the user selected in the UI.
+    If run_token is supplied and found, uses cached dataframes from the /api/data flow.
+    """
+    try:
+        if payload.run_token:
+            try:
+                orig_df, dl_df = get_session(payload.run_token)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="run_token not found")
+        else:
+            # If your pipeline always uses run_token, we can require it.
+            # But for flexibility, fail with a clear error:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing run_token. Use /api/data/columns first or call /run_comparison_files with CSV uploads.",
+            )
+
+        merged = build_comparison(
+            orig_df,
+            dl_df,
+            orig_x=payload.orig_x,
+            orig_y=payload.orig_y,
+            orig_val=payload.orig_val,
+            dl_x=payload.dl_x,
+            dl_y=payload.dl_y,
+            dl_val=payload.dl_val,
+            rounding=payload.rounding,
+        )
+
+        n = int(len(merged))
+        # Light-weight payload for plotting on the frontend
+        # (If you already shape Plotly traces elsewhere, adapt as needed.)
+        resp = {
+            "n_pairs": n,
+            "preview": _sanitize_for_json(merged, n=5),
+            "scatter": {
+                "x": merged["orig_val"].tolist(),
+                "y": merged["dl_val"].tolist(),
+                "x_label": payload.orig_val,
+                "y_label": payload.dl_val,
+            },
+            "residuals": {
+                "values": merged["residual"].tolist(),
+                "label": f"{payload.dl_val} - {payload.orig_val}",
+            },
+        }
+        return JSONResponse(resp)
 
     except HTTPException:
         raise
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("run_comparison failed")
+        raise HTTPException(status_code=500, detail=f"run_comparison failed: {e}")
+
+
+@router.post("/run_comparison_files", response_model=ComparisonResponse)
+def run_comparison_files(
+    # Accept files directly if you want to bypass run_token
+    original: UploadFile = File(..., description="Original CSV"),
+    dl: UploadFile = File(..., description="DL CSV"),
+    orig_x: str = Form(...),
+    orig_y: str = Form(...),
+    orig_val: str = Form(...),
+    dl_x: str = Form(...),
+    dl_y: str = Form(...),
+    dl_val: str = Form(...),
+    rounding: int = Form(6),
+) -> Any:
+    try:
+        orig_df = _read_csv_upload(original)
+        dl_df = _read_csv_upload(dl)
+
+        # Optionally stash a session for follow-up calls
+        token = str(uuid.uuid4())
+        put_session(token, orig_df, dl_df)
+
+        merged = build_comparison(
+            orig_df,
+            dl_df,
+            orig_x=orig_x,
+            orig_y=orig_y,
+            orig_val=orig_val,
+            dl_x=dl_x,
+            dl_y=dl_y,
+            dl_val=dl_val,
+            rounding=rounding,
+        )
+        n = int(len(merged))
+        resp = {
+            "n_pairs": n,
+            "preview": _sanitize_for_json(merged, n=5),
+            "scatter": {
+                "x": merged["orig_val"].tolist(),
+                "y": merged["dl_val"].tolist(),
+                "x_label": orig_val,
+                "y_label": dl_val,
+            },
+            "residuals": {
+                "values": merged["residual"].tolist(),
+                "label": f"{dl_val} - {orig_val}",
+            },
+            # Expose the token in case the FE wants to reuse it
+            "run_token": token,
+        }
+        return JSONResponse(resp)
+
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.exception("run_comparison_files failed")
+        raise HTTPException(status_code=500, detail=f"run_comparison_files failed: {e}")
+
+
+# ------------------------------------------------------------------------------
+# (Optional) Stubs for other analysis endpoints your FE might call.
+# Keep or remove depending on your project.
+# ------------------------------------------------------------------------------
+
+class SummaryRequest(BaseModel):
+    run_token: Optional[str] = None
+    value_column: Optional[str] = None
+
+
+@router.post("/run_summary")
+def run_summary(payload: SummaryRequest = Body(...)) -> Any:
+    try:
+        if not payload.run_token:
+            raise HTTPException(status_code=400, detail="run_token is required")
+        orig_df, dl_df = get_session(payload.run_token)
+
+        col = payload.value_column or "Te_ppm"
+        _coerce_num(orig_df, [col])
+        _coerce_num(dl_df, [col])
+
+        summary = {
+            "original": {
+                "rows": int(len(orig_df)),
+                "cols": list(orig_df.columns),
+                "value_stats": orig_df[col].describe().to_dict()
+                if col in orig_df.columns
+                else None,
+            },
+            "dl": {
+                "rows": int(len(dl_df)),
+                "cols": list(dl_df.columns),
+                "value_stats": dl_df[col].describe().to_dict()
+                if col in dl_df.columns
+                else None,
+            },
+        }
+        return JSONResponse(summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("run_summary failed")
+        raise HTTPException(status_code=500, detail=f"run_summary failed: {e}")
+
+
+class ExportRequest(BaseModel):
+    run_token: str
+    filename: Optional[str] = "comparison_export.csv"
+    # repeat the mapping so export matches the same pairing
+    orig_x: str
+    orig_y: str
+    orig_val: str
+    dl_x: str
+    dl_y: str
+    dl_val: str
+    rounding: int = 6
+
+
+@router.post("/export_plots")
+def export_plots(payload: ExportRequest = Body(...)) -> Any:
+    try:
+        orig_df, dl_df = get_session(payload.run_token)
+        merged = build_comparison(
+            orig_df,
+            dl_df,
+            orig_x=payload.orig_x,
+            orig_y=payload.orig_y,
+            orig_val=payload.orig_val,
+            dl_x=payload.dl_x,
+            dl_y=payload.dl_y,
+            dl_val=payload.dl_val,
+            rounding=payload.rounding,
+        )
+        csv_bytes = merged.to_csv(index=False).encode("utf-8")
+        # Return inlined to keep things simple; adapt to your storage as needed
+        return JSONResponse(
+            {
+                "filename": payload.filename,
+                "bytes_b64": base64.b64encode(csv_bytes).decode("utf-8"),
+                "n_rows": int(len(merged)),
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("export_plots failed")
+        raise HTTPException(status_code=500, detail=f"export_plots failed: {e}")
 
 
