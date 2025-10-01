@@ -150,7 +150,14 @@ export async function exportPlots(
   dlFile: File,
   originalAssay: string,
   dlAssay: string,
-  selectedPlots: Record<string, boolean>
+  selectedPlots: Record<string, boolean>,
+  // Optional parameters for heatmap generation
+  originalNorthing?: string,
+  originalEasting?: string,
+  dlNorthing?: string,
+  dlEasting?: string,
+  method?: string,
+  gridSize?: number
 ): Promise<Blob> {
   const formData = new FormData();
   formData.append("original_file", originalFile);
@@ -158,6 +165,14 @@ export async function exportPlots(
   formData.append("original_assay", originalAssay);
   formData.append("dl_assay", dlAssay);
   formData.append("selected_plots", JSON.stringify(selectedPlots));
+  
+  // Add heatmap parameters if provided
+  if (originalNorthing) formData.append("original_northing", originalNorthing);
+  if (originalEasting) formData.append("original_easting", originalEasting);
+  if (dlNorthing) formData.append("dl_northing", dlNorthing);
+  if (dlEasting) formData.append("dl_easting", dlEasting);
+  if (method) formData.append("method", method);
+  if (gridSize !== undefined) formData.append("grid_size", gridSize.toString());
 
   const response = await fetch(`${API}/api/analysis/export/plots`, {
     method: "POST",
@@ -210,3 +225,4 @@ export async function exportGridCSV(
 
   return response.blob();
 }
+ 

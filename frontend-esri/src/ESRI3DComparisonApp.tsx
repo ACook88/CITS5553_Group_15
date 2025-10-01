@@ -23,8 +23,15 @@ import {
 import JSZip from "jszip";
 import * as THREE from "three";
 import { fetchColumns } from "./api/data";
-import { runSummary, runPlotsData, runComparison, exportPlots, exportGridCSV, type PlotData } from "./api/analysis";
+import {
+  runSummary,
+  runPlotsData,
+  runComparison,
+  exportPlots,
+  type PlotData,
+} from "./api/analysis";
 import Plot from "react-plotly.js";
+import Plotly from "plotly.js-dist-min";
 
 const isAcceptedName = (name: string) => {
   const lower = name.toLowerCase().trim();
@@ -167,6 +174,10 @@ export default function ESRI3DComparisonApp() {
   });
 
   const [showPlotSelection, setShowPlotSelection] = useState(false);
+
+  // Export states to match other button patterns
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
 
   // Ready to run comparison (full pipeline)
   const readyToRun =
@@ -450,10 +461,10 @@ export default function ESRI3DComparisonApp() {
     try {
       setPlotsLoading(true);
       setPlotsData({});
-      
+
       // Get plot data
       const plotData = await runPlotsData(originalZip, dlZip, oAssay, dAssay);
-      
+
       setPlotsData({
         original: plotData.original_data,
         dl: plotData.dl_data,
@@ -518,18 +529,18 @@ export default function ESRI3DComparisonApp() {
 
   // Plot selection helpers
   const plotOptions = [
-    { key: 'originalHistogram', label: 'Original Histogram' },
-    { key: 'dlHistogram', label: 'DL Histogram' },
-    { key: 'qqPlot', label: 'QQ Plot' },
-    { key: 'originalHeatmap', label: 'Original Heatmap' },
-    { key: 'dlHeatmap', label: 'DL Heatmap' },
-    { key: 'comparisonHeatmap', label: 'Comparison Heatmap' },
+    { key: "originalHistogram", label: "Original Histogram" },
+    { key: "dlHistogram", label: "DL Histogram" },
+    { key: "qqPlot", label: "QQ Plot" },
+    { key: "originalHeatmap", label: "Original Heatmap" },
+    { key: "dlHeatmap", label: "DL Heatmap" },
+    { key: "comparisonHeatmap", label: "Comparison Heatmap" },
   ];
 
   const handlePlotSelection = (plotKey: string, checked: boolean) => {
-    setSelectedPlots(prev => ({
+    setSelectedPlots((prev) => ({
       ...prev,
-      [plotKey]: checked
+      [plotKey]: checked,
     }));
   };
 
@@ -547,59 +558,15 @@ export default function ESRI3DComparisonApp() {
   const isAllSelected = Object.values(selectedPlots).every(Boolean);
   const hasAnySelection = Object.values(selectedPlots).some(Boolean);
 
-  async function onExport(type: "plots" | "csv") {
-    if (!runId) {
-      alert("Nothing to export yet. Please run a comparison first.");
-      return;
-    }
-    
+  async function onExport(type: "plots") {
     if (type === "plots") {
+      if (!runId) {
+        alert("Nothing to export yet. Please run a comparison first.");
+        return;
+      }
       setShowPlotSelection(true);
-    } else if (type === "csv") {
-      await handleExportCSV();
     }
   }
-
-  const handleExportCSV = async () => {
-    if (!originalZip || !dlZip || !method || !gridSize) {
-      alert("Missing required data for CSV export");
-      return;
-    }
-
-    try {
-      const mapping = {
-        oN: originalMap["Northing"]!,
-        oE: originalMap["Easting"]!,
-        oA: originalMap["Assay"]!,
-        dN: dlMap["Northing"]!,
-        dE: dlMap["Easting"]!,
-        dA: dlMap["Assay"]!,
-      };
-
-      const blob = await exportGridCSV(
-        originalZip,
-        dlZip,
-        mapping,
-        method,
-        gridSize
-      );
-
-      // Create download link
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'grid_data.csv';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      setToast({ msg: "Grid data exported successfully!" });
-    } catch (error: any) {
-      console.error("CSV export failed:", error);
-      alert(`CSV export failed: ${error.message}`);
-    }
-  };
 
   const handleExportPlots = async () => {
     if (!originalZip || !dlZip || !originalMap.Assay || !dlMap.Assay) {
@@ -607,30 +574,61 @@ export default function ESRI3DComparisonApp() {
       return;
     }
 
+    setExportLoading(true);
+    setExportSuccess(false);
+
     try {
       const blob = await exportPlots(
         originalZip,
         dlZip,
         originalMap.Assay,
         dlMap.Assay,
-        selectedPlots
+        selectedPlots,
+        // Pass heatmap parameters if heatmaps are selected
+        originalMap.Northing,
+        originalMap.Easting,
+        dlMap.Northing,
+        dlMap.Easting,
+        method || undefined,
+        gridSize || undefined
       );
+
+      // Verify blob is valid
+      if (!blob || blob.size === 0) {
+        throw new Error("Received empty or invalid file from server");
+      }
 
       // Create download link
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
-      a.download = 'plots.zip';
+      a.download = "plots.zip";
+      a.style.display = "none";
       document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
 
-      setShowPlotSelection(false);
+      // Trigger download
+      a.click();
+
+      // Clean up after download starts
+      setTimeout(() => {
+        if (document.body.contains(a)) {
+          document.body.removeChild(a);
+        }
+        window.URL.revokeObjectURL(url);
+      }, 100);
+
+      setExportSuccess(true);
       setToast({ msg: "Plots exported successfully!" });
+
+      // Close modal after a short delay to ensure download starts
+      setTimeout(() => {
+        setShowPlotSelection(false);
+      }, 1000);
     } catch (error: any) {
       console.error("Export failed:", error);
       alert(`Export failed: ${error.message}`);
+    } finally {
+      setExportLoading(false);
     }
   };
 
@@ -668,6 +666,8 @@ export default function ESRI3DComparisonApp() {
       comparisonHeatmap: false,
     });
     setShowPlotSelection(false);
+    setExportLoading(false);
+    setExportSuccess(false);
     resetComparison();
   }
   function resetComparison() {
@@ -1242,10 +1242,10 @@ export default function ESRI3DComparisonApp() {
                             name: "Samples",
                           },
                         ].filter(Boolean)}
-                         layout={{
-                           ...axesLikeNotebook(gridOut),
-                           autosize: true,
-                         }}
+                        layout={{
+                          ...axesLikeNotebook(gridOut),
+                          autosize: true,
+                        }}
                         config={{ responsive: true, displaylogo: false }}
                         style={{ width: "100%", height: PLOT_HEIGHT }}
                       />
@@ -1253,9 +1253,7 @@ export default function ESRI3DComparisonApp() {
 
                     {/* DL (log10) */}
                     <div className="rounded-2xl border border-gray-200 p-3">
-                      <div className="text-sm font-medium mb-2">
-                        DL heatmap
-                      </div>
+                      <div className="text-sm font-medium mb-2">DL heatmap</div>
                       <Plot
                         data={[
                           {
@@ -1296,10 +1294,10 @@ export default function ESRI3DComparisonApp() {
                             name: "Samples",
                           },
                         ].filter(Boolean)}
-                         layout={{
-                           ...axesLikeNotebook(gridOut),
-                           autosize: true,
-                         }}
+                        layout={{
+                          ...axesLikeNotebook(gridOut),
+                          autosize: true,
+                        }}
                         config={{ responsive: true, displaylogo: false }}
                         style={{ width: "100%", height: PLOT_HEIGHT }}
                       />
@@ -1366,10 +1364,10 @@ export default function ESRI3DComparisonApp() {
                                   }
                                 : null,
                             ].filter(Boolean)}
-                             layout={{
-                               ...axesLikeNotebook(gridOut),
-                               autosize: true,
-                             }}
+                            layout={{
+                              ...axesLikeNotebook(gridOut),
+                              autosize: true,
+                            }}
                             config={{ responsive: true, displaylogo: false }}
                             style={{ width: "100%", height: PLOT_HEIGHT }}
                           />
@@ -1410,21 +1408,9 @@ export default function ESRI3DComparisonApp() {
                 >
                   Export Plots
                 </button>
-                <button
-                  className={
-                    "rounded-xl px-4 py-2 text-sm transition " +
-                    (exportEnabled
-                      ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
-                      : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
-                  }
-                  disabled={!exportEnabled}
-                  onClick={() => onExport("csv")}
-                >
-                  Export Grid CSV
-                </button>
               </div>
               <p className="text-xs text-neutral-500 mt-3">
-                Buttons enable after the first 3 steps.
+                Export Plots: Download selected plots as PNG files.
               </p>
 
               {/* Plot Selection Modal */}
@@ -1432,7 +1418,9 @@ export default function ESRI3DComparisonApp() {
                 <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
                   <div className="bg-white rounded-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto">
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-semibold">Select Plots to Export</h3>
+                      <h3 className="text-lg font-semibold">
+                        Select Plots to Export
+                      </h3>
                       <button
                         onClick={() => setShowPlotSelection(false)}
                         className="text-neutral-500 hover:text-neutral-700"
@@ -1440,7 +1428,7 @@ export default function ESRI3DComparisonApp() {
                         <X className="h-5 w-5" />
                       </button>
                     </div>
-                    
+
                     <div className="space-y-3">
                       {/* Select All checkbox */}
                       <div className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200">
@@ -1451,22 +1439,37 @@ export default function ESRI3DComparisonApp() {
                           onChange={(e) => handleSelectAll(e.target.checked)}
                           className="h-4 w-4 text-[#7C3AED] focus:ring-[#7C3AED] border-neutral-300 rounded"
                         />
-                        <label htmlFor="select-all" className="text-sm font-medium text-neutral-700">
+                        <label
+                          htmlFor="select-all"
+                          className="text-sm font-medium text-neutral-700"
+                        >
                           Select All
                         </label>
                       </div>
 
                       {/* Individual plot checkboxes */}
                       {plotOptions.map((option) => (
-                        <div key={option.key} className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200">
+                        <div
+                          key={option.key}
+                          className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200"
+                        >
                           <input
                             type="checkbox"
                             id={option.key}
-                            checked={selectedPlots[option.key as keyof typeof selectedPlots]}
-                            onChange={(e) => handlePlotSelection(option.key, e.target.checked)}
+                            checked={
+                              selectedPlots[
+                                option.key as keyof typeof selectedPlots
+                              ]
+                            }
+                            onChange={(e) =>
+                              handlePlotSelection(option.key, e.target.checked)
+                            }
                             className="h-4 w-4 text-[#7C3AED] focus:ring-[#7C3AED] border-neutral-300 rounded"
                           />
-                          <label htmlFor={option.key} className="text-sm text-neutral-700">
+                          <label
+                            htmlFor={option.key}
+                            className="text-sm text-neutral-700"
+                          >
                             {option.label}
                           </label>
                         </div>
@@ -1482,15 +1485,20 @@ export default function ESRI3DComparisonApp() {
                       </button>
                       <button
                         onClick={handleExportPlots}
-                        disabled={!hasAnySelection}
+                        disabled={!hasAnySelection || exportLoading}
                         className={
-                          "flex-1 rounded-xl px-4 py-2 text-sm font-medium transition " +
-                          (hasAnySelection
+                          "flex-1 rounded-xl px-4 py-2 text-sm font-medium transition flex items-center justify-center gap-2 " +
+                          (hasAnySelection && !exportLoading
                             ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
                             : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                         }
                       >
-                        Export Selected
+                        {exportLoading ? "Exporting…" : "Export Selected"}
+                        {exportSuccess && !exportLoading && (
+                          <span className="inline-flex items-center text-[#10B981]">
+                            <CheckCircle2 className="h-4 w-4" />
+                          </span>
+                        )}
                       </button>
                     </div>
                   </div>
@@ -1919,10 +1927,8 @@ function ControlsBar(props: {
   const [gridInput, setGridInput] = React.useState<string>(
     gridSize !== null ? String(gridSize) : ""
   );
-  const isInvalidGridLow =
-    gridInput !== "" && Number(gridInput) < minGrid;
-  const isInvalidGridHigh =
-    gridInput !== "" && Number(gridInput) > maxGrid;
+  const isInvalidGridLow = gridInput !== "" && Number(gridInput) < minGrid;
+  const isInvalidGridHigh = gridInput !== "" && Number(gridInput) > maxGrid;
   const isInvalidGrid = isInvalidGridLow || isInvalidGridHigh;
 
   React.useEffect(() => {
@@ -1997,7 +2003,9 @@ function ControlsBar(props: {
                 max={maxGrid}
                 step={stepGrid}
                 value={
-                  gridSize !== null && gridSize >= minGrid && gridSize <= maxGrid
+                  gridSize !== null &&
+                  gridSize >= minGrid &&
+                  gridSize <= maxGrid
                     ? gridSize
                     : minGrid
                 }
@@ -2032,7 +2040,7 @@ function ControlsBar(props: {
                     background: "transparent",
                     fontSize: "13px",
                     whiteSpace: "nowrap",
-                    marginLeft: "2px"
+                    marginLeft: "2px",
                   }}
                 >
                   {isInvalidGridLow
@@ -2040,8 +2048,10 @@ function ControlsBar(props: {
                     : `Enter value below ${maxGrid}`}
                 </div>
               )}
-              <span className="text-sm font-medium"
-                style={{ color: isInvalidGrid ? "#dc2626" : "#374151" }}>
+              <span
+                className="text-sm font-medium"
+                style={{ color: isInvalidGrid ? "#dc2626" : "#374151" }}
+              >
                 {gridInput !== "" ? `${gridInput} m` : "-- m"}
               </span>
             </div>
@@ -2128,36 +2138,52 @@ const fmt = (v?: number | null) => {
 
 // Helper function to create histogram plot data
 const createHistogramPlot = (data: PlotData) => {
-  // Calculate bar widths for log scale
-  const binWidths = data.bin_edges ? 
-    data.bin_edges.slice(1).map((edge, i) => edge - data.bin_edges![i]) : 
-    data.x.map((_, i) => i > 0 ? data.x[i] - data.x[i-1] : 0);
-  
+  // Calculate bar widths for log scale using bin_edges if available
+  const binWidths = data.bin_edges
+    ? data.bin_edges.slice(0, -1).map((e, i) => data.bin_edges![i + 1] - e)
+    : data.x.map((_, i) => (i > 0 ? data.x[i] - data.x[i - 1] : 0));
+
+  // If log_x, set tickvals/ticktext for powers of ten
+  let xaxis: any = {
+    title: data.xlabel || "Value",
+    type: data.log_x ? "log" : "linear",
+  };
+  if (data.log_x && data.bin_edges) {
+    // Find integer log10s within bin_edges range
+    const min = Math.ceil(Math.log10(data.bin_edges[0]));
+    const max = Math.floor(
+      Math.log10(data.bin_edges[data.bin_edges.length - 1])
+    );
+    const tickvals = [];
+    for (let i = min; i <= max; ++i) tickvals.push(Math.pow(10, i));
+    xaxis.tickvals = tickvals;
+    xaxis.ticktext = tickvals.map((v) => `10${superscript(Math.log10(v))}`);
+  }
+
   return {
-    data: [{
-      x: data.x,
-      y: data.y,
-      type: 'bar',
-      marker: { 
-        color: '#7C3AED',
-        line: { color: 'black', width: 0.5 }
+    data: [
+      {
+        x: data.bin_edges ? data.bin_edges.slice(0, -1) : data.x,
+        y: data.y,
+        type: "bar",
+        marker: {
+          color: "#7C3AED",
+          line: { color: "black", width: 0.5 },
+        },
+        name: "Count",
+        width: binWidths,
+        offset: 0,
       },
-      name: 'Count',
-      width: binWidths,
-      offset: 0
-    }],
+    ],
     layout: {
       title: data.title,
-      xaxis: { 
-        title: data.xlabel,
-        type: data.log_x ? 'log' : 'linear'
-      },
-      yaxis: { title: data.ylabel },
+      xaxis,
+      yaxis: { title: data.ylabel || "Count" },
       margin: { l: 60, r: 20, t: 60, b: 60 },
       height: 600,
-      bargap: 0
+      bargap: 0, // minimize gap between bars
     },
-    config: { responsive: true, displaylogo: false }
+    config: { responsive: true, displaylogo: false },
   };
 };
 
@@ -2168,34 +2194,34 @@ const createQQPlot = (data: PlotData) => {
       {
         x: data.x,
         y: data.y,
-        type: 'scatter',
-        mode: 'markers',
-        marker: { color: '#7C3AED', size: 8 },
-        name: 'Data points'
+        type: "scatter",
+        mode: "markers",
+        marker: { color: "#7C3AED", size: 8 },
+        name: "Data points",
       },
       {
         x: data.line_x,
         y: data.line_y,
-        type: 'scatter',
-        mode: 'lines',
-        line: { color: 'black', dash: 'dash', width: 1 },
-        name: 'Reference line'
-      }
+        type: "scatter",
+        mode: "lines",
+        line: { color: "black", dash: "dash", width: 1 },
+        name: "Reference line",
+      },
     ],
     layout: {
       title: data.title,
-      xaxis: { 
-        title: data.xlabel,
-        type: data.log_x ? 'log' : 'linear'
+      xaxis: {
+        title: data.xlabel || "Original Quantiles",
+        type: data.log_x ? "log" : "linear",
       },
-      yaxis: { 
-        title: data.ylabel,
-        type: data.log_y ? 'log' : 'linear'
+      yaxis: {
+        title: data.ylabel || "DL Quantiles",
+        type: data.log_y ? "log" : "linear",
       },
       margin: { l: 60, r: 20, t: 60, b: 60 },
-      height: 600
+      height: 600,
     },
-    config: { responsive: true, displaylogo: false }
+    config: { responsive: true, displaylogo: false },
   };
 };
 
@@ -2277,4 +2303,26 @@ function axesLikeNotebook(gridOut: {
     },
     margin: { l: 76, r: 76, b: 62, t: 90 }, // t: 90 leaves more space above grid for title
   };
+}
+
+// Utility to download a Plotly plot as image (PNG)
+function downloadPlotImage(
+  plotDiv: HTMLDivElement | null,
+  filename = "plot.png"
+) {
+  if (!plotDiv) return;
+  Plotly.toImage(plotDiv, {
+    format: "png",
+    height: 600,
+    width: plotDiv.offsetWidth || 900,
+  }).then((dataUrl: string) => {
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      if (document.body.contains(a)) document.body.removeChild(a);
+    }, 100);
+  });
 }
