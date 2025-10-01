@@ -23,8 +23,15 @@ import {
 import JSZip from "jszip";
 import * as THREE from "three";
 import { fetchColumns } from "./api/data";
-import { runSummary, runPlots, runComparison } from "./api/analysis";
+import {
+  runSummary,
+  runPlotsData,
+  runComparison,
+  exportPlots,
+  type PlotData,
+} from "./api/analysis";
 import Plot from "react-plotly.js";
+import Plotly from "plotly.js-dist-min";
 
 const isAcceptedName = (name: string) => {
   const lower = name.toLowerCase().trim();
@@ -84,10 +91,10 @@ export default function ESRI3DComparisonApp() {
 
   // --- Plots state ---
   const [plotsLoading, setPlotsLoading] = useState(false);
-  const [plots, setPlots] = useState<{
-    original?: string;
-    dl?: string;
-    qq?: string;
+  const [plotsData, setPlotsData] = useState<{
+    original?: PlotData;
+    dl?: PlotData;
+    qq?: PlotData;
   }>({});
 
   // Add these two states near your other useState lines
@@ -149,6 +156,29 @@ export default function ESRI3DComparisonApp() {
   // Export after 1,2,4 chosen
   const exportEnabled = !!originalZip && !!dlZip && method !== null;
 
+  // Plot selection state for export
+  const [selectedPlots, setSelectedPlots] = useState<{
+    originalHistogram: boolean;
+    dlHistogram: boolean;
+    qqPlot: boolean;
+    originalHeatmap: boolean;
+    dlHeatmap: boolean;
+    comparisonHeatmap: boolean;
+  }>({
+    originalHistogram: false,
+    dlHistogram: false,
+    qqPlot: false,
+    originalHeatmap: false,
+    dlHeatmap: false,
+    comparisonHeatmap: false,
+  });
+
+  const [showPlotSelection, setShowPlotSelection] = useState(false);
+
+  // Export states to match other button patterns
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
+
   // Ready to run comparison (full pipeline)
   const readyToRun =
     !!originalZip &&
@@ -192,6 +222,7 @@ export default function ESRI3DComparisonApp() {
     },
     []
   );
+
 
   const handleInput = (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -430,12 +461,15 @@ export default function ESRI3DComparisonApp() {
     }
     try {
       setPlotsLoading(true);
-      setPlots({});
-      const r = await runPlots(originalZip, dlZip, oAssay, dAssay);
-      setPlots({
-        original: `data:image/png;base64,${r.original_png}`,
-        dl: `data:image/png;base64,${r.dl_png}`,
-        qq: `data:image/png;base64,${r.qq_png}`,
+      setPlotsData({});
+
+      // Get plot data
+      const plotData = await runPlotsData(originalZip, dlZip, oAssay, dAssay);
+
+      setPlotsData({
+        original: plotData.original_data,
+        dl: plotData.dl_data,
+        qq: plotData.qq_data,
       });
     } catch (e: any) {
       console.error(e);
@@ -494,13 +528,110 @@ export default function ESRI3DComparisonApp() {
     }
   }
 
-  async function onExport(type: "png" | "csv") {
-    if (!runId) {
-      alert("Nothing to export yet. Please run a comparison first.");
+  // Plot selection helpers
+  const plotOptions = [
+    { key: "originalHistogram", label: "Original Histogram" },
+    { key: "dlHistogram", label: "DL Histogram" },
+    { key: "qqPlot", label: "QQ Plot" },
+    { key: "originalHeatmap", label: "Original Heatmap" },
+    { key: "dlHeatmap", label: "DL Heatmap" },
+    { key: "comparisonHeatmap", label: "Comparison Heatmap" },
+  ];
+
+  const handlePlotSelection = (plotKey: string, checked: boolean) => {
+    setSelectedPlots((prev) => ({
+      ...prev,
+      [plotKey]: checked,
+    }));
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    setSelectedPlots({
+      originalHistogram: checked,
+      dlHistogram: checked,
+      qqPlot: checked,
+      originalHeatmap: checked,
+      dlHeatmap: checked,
+      comparisonHeatmap: checked,
+    });
+  };
+
+  const isAllSelected = Object.values(selectedPlots).every(Boolean);
+  const hasAnySelection = Object.values(selectedPlots).some(Boolean);
+
+  async function onExport(type: "plots") {
+    if (type === "plots") {
+      if (!runId) {
+        alert("Nothing to export yet. Please run a comparison first.");
+        return;
+      }
+      setShowPlotSelection(true);
+    }
+  }
+
+  const handleExportPlots = async () => {
+    if (!originalZip || !dlZip || !originalMap.Assay || !dlMap.Assay) {
+      alert("Missing required data for export");
       return;
     }
-    alert(`Exporting ${type.toUpperCase()}… (wire to backend)`);
-  }
+
+    setExportLoading(true);
+    setExportSuccess(false);
+
+    try {
+      const blob = await exportPlots(
+        originalZip,
+        dlZip,
+        originalMap.Assay,
+        dlMap.Assay,
+        selectedPlots,
+        // Pass heatmap parameters if heatmaps are selected
+        originalMap.Northing,
+        originalMap.Easting,
+        dlMap.Northing,
+        dlMap.Easting,
+        method || undefined,
+        gridSize || undefined
+      );
+
+      // Verify blob is valid
+      if (!blob || blob.size === 0) {
+        throw new Error("Received empty or invalid file from server");
+      }
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "plots.zip";
+      a.style.display = "none";
+      document.body.appendChild(a);
+
+      // Trigger download
+      a.click();
+
+      // Clean up after download starts
+      setTimeout(() => {
+        if (document.body.contains(a)) {
+          document.body.removeChild(a);
+        }
+        window.URL.revokeObjectURL(url);
+      }, 100);
+
+      setExportSuccess(true);
+      setToast({ msg: "Plots exported successfully!" });
+
+      // Close modal after a short delay to ensure download starts
+      setTimeout(() => {
+        setShowPlotSelection(false);
+      }, 1000);
+    } catch (error: any) {
+      console.error("Export failed:", error);
+      alert(`Export failed: ${error.message}`);
+    } finally {
+      setExportLoading(false);
+    }
+  };
 
   // --- Reset helpers ---
   function resetDataLoading() {
@@ -525,8 +656,19 @@ export default function ESRI3DComparisonApp() {
     setAnalysisRun(false);
     setStatsOriginal(null);
     setStatsDl(null);
-    setPlots({}); // <-- clear plots state as well
+    setPlotsData({}); // <-- clear plots data state as well
     setPlotsLoading(false); // <-- reset loading state for plots
+    setSelectedPlots({
+      originalHistogram: false,
+      dlHistogram: false,
+      qqPlot: false,
+      originalHeatmap: false,
+      dlHeatmap: false,
+      comparisonHeatmap: false,
+    });
+    setShowPlotSelection(false);
+    setExportLoading(false);
+    setExportSuccess(false);
     resetComparison();
   }
   function resetComparison() {
@@ -833,20 +975,20 @@ export default function ESRI3DComparisonApp() {
                     disabled={
                       !analysisRun ||
                       plotsLoading ||
-                      !!(plots.original && plots.dl && plots.qq)
+                      !!(plotsData.original && plotsData.dl && plotsData.qq)
                     }
                     className={
                       "rounded-xl px-5 py-2.5 text-sm font-medium transition flex items-center gap-2 " +
                       (!analysisRun || plotsLoading
                         ? "bg-neutral-200 text-neutral-500 cursor-not-allowed"
-                        : !plots.original || !plots.dl || !plots.qq
+                        : !plotsData.original || !plotsData.dl || !plotsData.qq
                         ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
                         : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                     }
                   >
                     {plotsLoading ? (
                       "Rendering…"
-                    ) : plots.original && plots.dl && plots.qq ? (
+                    ) : plotsData.original && plotsData.dl && plotsData.qq ? (
                       <>
                         Show Plots
                         <span className="inline-flex items-center text-[#10B981] ml-2">
@@ -905,30 +1047,24 @@ export default function ESRI3DComparisonApp() {
                 {/* Plots gallery */}
                 {analysisRun &&
                   !analysisLoading &&
-                  (plots.original || plots.dl || plots.qq) && (
-                    <section className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  (plotsData.original || plotsData.dl || plotsData.qq) && (
+                    <section className="mt-5 flex flex-col gap-4">
                       <div className="rounded-2xl border border-neutral-200 bg-white p-3">
                         <div className="text-sm font-medium mb-2">
                           Original histogram
                         </div>
-                        {plots.original ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              plots.original &&
-                              openLightbox(plots.original, "Original histogram")
-                            }
-                            className="block w-full cursor-zoom-in"
-                            aria-label="Open Original histogram"
-                          >
-                            <img
-                              src={plots.original}
-                              alt="Original histogram"
-                              className="w-full h-[260px] object-contain rounded-xl bg-[#F9FAFB] border border-neutral-100"
-                            />
-                          </button>
+                        {plotsData.original ? (
+                          <Plot
+                            {...createHistogramPlot(plotsData.original)}
+                            style={{ width: "100%", height: 600 }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"], // hide camera
+                            }}
+                          />
                         ) : (
-                          <div className="h-[260px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
+                          <div className="h-[600px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
                             No plot yet
                           </div>
                         )}
@@ -937,23 +1073,18 @@ export default function ESRI3DComparisonApp() {
                         <div className="text-sm font-medium mb-2">
                           DL histogram
                         </div>
-                        {plots.dl ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              plots.dl && openLightbox(plots.dl, "DL histogram")
-                            }
-                            className="block w-full cursor-zoom-in"
-                            aria-label="Open DL histogram"
-                          >
-                            <img
-                              src={plots.dl}
-                              alt="DL histogram"
-                              className="w-full h-[260px] object-contain rounded-xl bg-[#F9FAFB] border border-neutral-100"
-                            />
-                          </button>
+                        {plotsData.dl ? (
+                          <Plot
+                            {...createHistogramPlot(plotsData.dl)}
+                            style={{ width: "100%", height: 600 }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
+                          />
                         ) : (
-                          <div className="h-[260px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
+                          <div className="h-[600px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
                             No plot yet
                           </div>
                         )}
@@ -962,24 +1093,18 @@ export default function ESRI3DComparisonApp() {
                         <div className="text-sm font-medium mb-2">
                           QQ plot (log–log)
                         </div>
-                        {plots.qq ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              plots.qq &&
-                              openLightbox(plots.qq, "QQ plot (log–log)")
-                            }
-                            className="block w-full cursor-zoom-in"
-                            aria-label="Open QQ plot"
-                          >
-                            <img
-                              src={plots.qq}
-                              alt="QQ plot"
-                              className="w-full h-[260px] object-contain rounded-xl bg-[#F9FAFB] border border-neutral-100"
-                            />
-                          </button>
+                        {plotsData.qq ? (
+                          <Plot
+                            {...createQQPlot(plotsData.qq)}
+                            style={{ width: "100%", height: 600 }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
+                          />
                         ) : (
-                          <div className="h-[260px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
+                          <div className="h-[600px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
                             No plot yet
                           </div>
                         )}
@@ -1086,6 +1211,9 @@ export default function ESRI3DComparisonApp() {
                   <div className="flex flex-col gap-6">
                     {/* ORIGINAL (log10) */}
                     <div className="rounded-2xl border border-gray-200 p-3">
+                      <div className="text-sm font-medium mb-2">
+                        Original heatmap
+                      </div>
                       <Plot
                         data={[
                           {
@@ -1131,23 +1259,21 @@ export default function ESRI3DComparisonApp() {
                           },
                         ].filter(Boolean)}
                         layout={{
-                          title: {
-                            text: `Original: Max ${
-                              originalMap.Assay || "Assay"
-                            }`,
-                            font: { size: 22 },
-                            y: 0.95,
-                          },
                           ...axesLikeNotebook(gridOut),
                           autosize: true,
                         }}
-                        config={{ responsive: true, displaylogo: false }}
+                        config={{
+                          responsive: true,
+                          displaylogo: false,
+                          modeBarButtonsToRemove: ["toImage"],
+                        }}
                         style={{ width: "100%", height: PLOT_HEIGHT }}
                       />
                     </div>
 
                     {/* DL (log10) */}
                     <div className="rounded-2xl border border-gray-200 p-3">
+                      <div className="text-sm font-medium mb-2">DL heatmap</div>
                       <Plot
                         data={[
                           {
@@ -1189,21 +1315,23 @@ export default function ESRI3DComparisonApp() {
                           },
                         ].filter(Boolean)}
                         layout={{
-                          title: {
-                            text: `DL: Max ${dlMap.Assay || "Assay"}`,
-                            font: { size: 22 },
-                            y: 0.95,
-                          },
                           ...axesLikeNotebook(gridOut),
                           autosize: true,
                         }}
-                        config={{ responsive: true, displaylogo: false }}
+                        config={{
+                          responsive: true,
+                          displaylogo: false,
+                          modeBarButtonsToRemove: ["toImage"],
+                        }}
                         style={{ width: "100%", height: PLOT_HEIGHT }}
                       />
                     </div>
 
                     {/* COMPARISON (DL − Original) */}
                     <div className="rounded-2xl border border-gray-200 p-3">
+                      <div className="text-sm font-medium mb-2">
+                        Comparison heatmap
+                      </div>
                       {(() => {
                         const pts = (gridOut.original_points ?? []).concat(
                           gridOut.dl_points ?? []
@@ -1261,15 +1389,14 @@ export default function ESRI3DComparisonApp() {
                                 : null,
                             ].filter(Boolean)}
                             layout={{
-                              title: {
-                                text: "DL – Original (Max)",
-                                font: { size: 22 },
-                                y: 0.95,
-                              },
                               ...axesLikeNotebook(gridOut),
                               autosize: true,
                             }}
-                            config={{ responsive: true, displaylogo: false }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
                             style={{ width: "100%", height: PLOT_HEIGHT }}
                           />
                         );
@@ -1305,26 +1432,106 @@ export default function ESRI3DComparisonApp() {
                       : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                   }
                   disabled={!exportEnabled}
-                  onClick={() => onExport("png")}
+                  onClick={() => onExport("plots")}
                 >
-                  Export Heatmap PNG
-                </button>
-                <button
-                  className={
-                    "rounded-xl px-4 py-2 text-sm transition " +
-                    (exportEnabled
-                      ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
-                      : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
-                  }
-                  disabled={!exportEnabled}
-                  onClick={() => onExport("csv")}
-                >
-                  Export Grid CSV
+                  Export Plots
                 </button>
               </div>
               <p className="text-xs text-neutral-500 mt-3">
-                Buttons enable after the first 3 steps.
+                Export Plots: Download selected plots as PNG files.
               </p>
+
+              {/* Plot Selection Modal */}
+              {showPlotSelection && (
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                  <div className="bg-white rounded-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold">
+                        Select Plots to Export
+                      </h3>
+                      <button
+                        onClick={() => setShowPlotSelection(false)}
+                        className="text-neutral-500 hover:text-neutral-700"
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {/* Select All checkbox */}
+                      <div className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200">
+                        <input
+                          type="checkbox"
+                          id="select-all"
+                          checked={isAllSelected}
+                          onChange={(e) => handleSelectAll(e.target.checked)}
+                          className="h-4 w-4 text-[#7C3AED] focus:ring-[#7C3AED] border-neutral-300 rounded"
+                        />
+                        <label
+                          htmlFor="select-all"
+                          className="text-sm font-medium text-neutral-700"
+                        >
+                          Select All
+                        </label>
+                      </div>
+
+                      {/* Individual plot checkboxes */}
+                      {plotOptions.map((option) => (
+                        <div
+                          key={option.key}
+                          className="flex items-center gap-3 p-3 rounded-lg border border-neutral-200"
+                        >
+                          <input
+                            type="checkbox"
+                            id={option.key}
+                            checked={
+                              selectedPlots[
+                                option.key as keyof typeof selectedPlots
+                              ]
+                            }
+                            onChange={(e) =>
+                              handlePlotSelection(option.key, e.target.checked)
+                            }
+                            className="h-4 w-4 text-[#7C3AED] focus:ring-[#7C3AED] border-neutral-300 rounded"
+                          />
+                          <label
+                            htmlFor={option.key}
+                            className="text-sm text-neutral-700"
+                          >
+                            {option.label}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex gap-3 mt-6">
+                      <button
+                        onClick={() => setShowPlotSelection(false)}
+                        className="flex-1 rounded-xl px-4 py-2 text-sm font-medium bg-neutral-200 text-neutral-700 hover:bg-neutral-300 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleExportPlots}
+                        disabled={!hasAnySelection || exportLoading}
+                        className={
+                          "flex-1 rounded-xl px-4 py-2 text-sm font-medium transition flex items-center justify-center gap-2 " +
+                          (hasAnySelection && !exportLoading
+                            ? "bg-[#7C3AED] text-white hover:bg-[#6D28D9]"
+                            : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
+                        }
+                      >
+                        {exportLoading ? "Exporting…" : "Export Selected"}
+                        {exportSuccess && !exportLoading && (
+                          <span className="inline-flex items-center text-[#10B981]">
+                            <CheckCircle2 className="h-4 w-4" />
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </section>
           )}
 
@@ -1740,9 +1947,39 @@ function ControlsBar(props: {
     }
   }
 
-  const minGrid = 1000, // changed from 100 to 1000
+  const minGrid = 1000,
     maxGrid = 900000,
     stepGrid = 50;
+
+  // Track invalid input state for grid cell size
+  const [gridInput, setGridInput] = React.useState<string>(
+    gridSize !== null ? String(gridSize) : ""
+  );
+  const isInvalidGridLow = gridInput !== "" && Number(gridInput) < minGrid;
+  const isInvalidGridHigh = gridInput !== "" && Number(gridInput) > maxGrid;
+  const isInvalidGrid = isInvalidGridLow || isInvalidGridHigh;
+
+  React.useEffect(() => {
+    // Sync input box with gridSize changes from slider
+    if (gridSize !== null && String(gridSize) !== gridInput) {
+      setGridInput(String(gridSize));
+    }
+    if (gridSize === null && gridInput !== "") {
+      setGridInput("");
+    }
+  }, [gridSize]);
+
+  function handleGridInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const val = e.target.value;
+    setGridInput(val);
+    if (val === "") {
+      onGridSizeChange(null);
+      return;
+    }
+    const num = Number(val);
+    if (isNaN(num)) return;
+    onGridSizeChange(num);
+  }
 
   return (
     <section className="mt-6 rounded-2xl border border-neutral-200 bg-white p-4 md:p-5">
@@ -1793,28 +2030,57 @@ function ControlsBar(props: {
                 min={minGrid}
                 max={maxGrid}
                 step={stepGrid}
-                value={gridSize ?? minGrid}
-                onChange={(e) => onGridSizeChange(Number(e.target.value))}
+                value={
+                  gridSize !== null &&
+                  gridSize >= minGrid &&
+                  gridSize <= maxGrid
+                    ? gridSize
+                    : minGrid
+                }
+                onChange={(e) => {
+                  setGridInput(e.target.value);
+                  onGridSizeChange(Number(e.target.value));
+                }}
                 className="w-40"
               />
-              <input
-                type="number"
-                min={minGrid}
-                max={maxGrid}
-                step={stepGrid}
-                value={gridSize ?? ""}
-                onChange={(e) => {
-                  const v =
-                    e.target.value === "" ? null : Number(e.target.value);
-                  if (v === null) onGridSizeChange(null);
-                  else
-                    onGridSizeChange(Math.max(minGrid, Math.min(maxGrid, v)));
-                }}
-                placeholder={`${minGrid}-${maxGrid}`}
-                className="h-9 w-24 rounded-lg border border-neutral-300 px-2 text-sm"
-              />
-              <span className="text-sm text-neutral-700 font-medium">
-                {gridSize !== null ? `${gridSize} m` : "-- m"}
+              <div className="relative">
+                <input
+                  type="number"
+                  min={0}
+                  max={maxGrid}
+                  step={stepGrid}
+                  value={gridInput}
+                  onChange={handleGridInputChange}
+                  placeholder={`${minGrid}-${maxGrid}`}
+                  className={
+                    "h-9 w-24 rounded-lg border px-2 text-sm " +
+                    (isInvalidGrid
+                      ? "border-red-500 text-red-600 bg-red-50"
+                      : "border-neutral-300")
+                  }
+                />
+              </div>
+              {(isInvalidGridLow || isInvalidGridHigh) && (
+                <div
+                  className="mt-1 text-xs font-medium"
+                  style={{
+                    color: "#dc2626",
+                    background: "transparent",
+                    fontSize: "13px",
+                    whiteSpace: "nowrap",
+                    marginLeft: "2px",
+                  }}
+                >
+                  {isInvalidGridLow
+                    ? `Enter value above ${minGrid}`
+                    : `Enter value below ${maxGrid}`}
+                </div>
+              )}
+              <span
+                className="text-sm font-medium"
+                style={{ color: isInvalidGrid ? "#dc2626" : "#374151" }}
+              >
+                {gridInput !== "" ? `${gridInput} m` : "-- m"}
               </span>
             </div>
           </div>
@@ -1896,6 +2162,95 @@ const fmt = (v?: number | null) => {
   if (typeof v !== "number" || !isFinite(v)) return "—";
   const rounded = Math.round(v * 100) / 100;
   return rounded % 1 === 0 ? String(rounded) : rounded.toFixed(2);
+};
+
+// Helper function to create histogram plot data
+const createHistogramPlot = (data: PlotData) => {
+  // Calculate bar widths for log scale using bin_edges if available
+  const binWidths = data.bin_edges
+    ? data.bin_edges.slice(0, -1).map((e, i) => data.bin_edges![i + 1] - e)
+    : data.x.map((_, i) => (i > 0 ? data.x[i] - data.x[i - 1] : 0));
+
+  // If log_x, set tickvals/ticktext for powers of ten
+  let xaxis: any = {
+    title: data.xlabel || "Value",
+    type: data.log_x ? "log" : "linear",
+  };
+  if (data.log_x && data.bin_edges) {
+    // Find integer log10s within bin_edges range
+    const min = Math.ceil(Math.log10(data.bin_edges[0]));
+    const max = Math.floor(
+      Math.log10(data.bin_edges[data.bin_edges.length - 1])
+    );
+    const tickvals = [];
+    for (let i = min; i <= max; ++i) tickvals.push(Math.pow(10, i));
+    xaxis.tickvals = tickvals;
+    xaxis.ticktext = tickvals.map((v) => `10${superscript(Math.log10(v))}`);
+  }
+
+  return {
+    data: [
+      {
+        x: data.bin_edges ? data.bin_edges.slice(0, -1) : data.x,
+        y: data.y,
+        type: "bar",
+        marker: {
+          color: "#7C3AED",
+          line: { color: "black", width: 0.5 },
+        },
+        name: "Count",
+        width: binWidths,
+        offset: 0,
+      },
+    ],
+    layout: {
+      title: data.title,
+      xaxis,
+      yaxis: { title: data.ylabel || "Count" },
+      margin: { l: 60, r: 20, t: 60, b: 60 },
+      height: 600,
+      bargap: 0, // minimize gap between bars
+    },
+    config: { responsive: true, displaylogo: false },
+  };
+};
+
+// Helper function to create QQ plot data
+const createQQPlot = (data: PlotData) => {
+  return {
+    data: [
+      {
+        x: data.x,
+        y: data.y,
+        type: "scatter",
+        mode: "markers",
+        marker: { color: "#7C3AED", size: 8 },
+        name: "Data points",
+      },
+      {
+        x: data.line_x,
+        y: data.line_y,
+        type: "scatter",
+        mode: "lines",
+        line: { color: "black", dash: "dash", width: 1 },
+        name: "Reference line",
+      },
+    ],
+    layout: {
+      title: data.title,
+      xaxis: {
+        title: data.xlabel || "Original Quantiles",
+        type: data.log_x ? "log" : "linear",
+      },
+      yaxis: {
+        title: data.ylabel || "DL Quantiles",
+        type: data.log_y ? "log" : "linear",
+      },
+      margin: { l: 60, r: 20, t: 60, b: 60 },
+      height: 600,
+    },
+    config: { responsive: true, displaylogo: false },
+  };
 };
 
 const PLOT_HEIGHT = 600; // match attached images

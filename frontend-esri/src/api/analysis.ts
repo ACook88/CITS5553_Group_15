@@ -66,6 +66,45 @@ export async function runPlots(
   return res.json();
 }
 
+export type PlotData = {
+  x: number[];
+  y: number[];
+  bin_edges?: number[];
+  title: string;
+  xlabel: string;
+  ylabel: string;
+  log_x: boolean;
+  log_y?: boolean;
+  line_x?: number[];
+  line_y?: number[];
+};
+
+export type PlotsDataResponse = {
+  original_data: PlotData;
+  dl_data: PlotData;
+  qq_data: PlotData;
+};
+
+export async function runPlotsData(
+  originalFile: File,
+  dlFile: File,
+  originalAssay: string,
+  dlAssay: string
+): Promise<PlotsDataResponse> {
+  const form = new FormData();
+  form.append("original", originalFile);
+  form.append("dl", dlFile);
+  form.append("original_assay", originalAssay);
+  form.append("dl_assay", dlAssay);
+
+  const res = await fetch(`${API}/api/analysis/plots-data`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function runComparison(
   originalFile: File,
   dlFile: File,
@@ -105,3 +144,85 @@ export async function runComparison(
   }
   return res.json();
 }
+
+export async function exportPlots(
+  originalFile: File,
+  dlFile: File,
+  originalAssay: string,
+  dlAssay: string,
+  selectedPlots: Record<string, boolean>,
+  // Optional parameters for heatmap generation
+  originalNorthing?: string,
+  originalEasting?: string,
+  dlNorthing?: string,
+  dlEasting?: string,
+  method?: string,
+  gridSize?: number
+): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("original_file", originalFile);
+  formData.append("dl_file", dlFile);
+  formData.append("original_assay", originalAssay);
+  formData.append("dl_assay", dlAssay);
+  formData.append("selected_plots", JSON.stringify(selectedPlots));
+  
+  // Add heatmap parameters if provided
+  if (originalNorthing) formData.append("original_northing", originalNorthing);
+  if (originalEasting) formData.append("original_easting", originalEasting);
+  if (dlNorthing) formData.append("dl_northing", dlNorthing);
+  if (dlEasting) formData.append("dl_easting", dlEasting);
+  if (method) formData.append("method", method);
+  if (gridSize !== undefined) formData.append("grid_size", gridSize.toString());
+
+  const response = await fetch(`${API}/api/analysis/export/plots`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || "Export plots failed");
+  }
+
+  return response.blob();
+}
+
+export async function exportGridCSV(
+  originalFile: File,
+  dlFile: File,
+  mapping: {
+    oN: string;
+    oE: string;
+    oA: string;
+    dN: string;
+    dE: string;
+    dA: string;
+  },
+  method: "max" | "mean" | "median",
+  gridSize: number
+): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("original_file", originalFile);
+  formData.append("dl_file", dlFile);
+  formData.append("original_northing", mapping.oN);
+  formData.append("original_easting", mapping.oE);
+  formData.append("original_assay", mapping.oA);
+  formData.append("dl_northing", mapping.dN);
+  formData.append("dl_easting", mapping.dE);
+  formData.append("dl_assay", mapping.dA);
+  formData.append("method", method);
+  formData.append("grid_size", gridSize.toString());
+
+  const response = await fetch(`${API}/api/analysis/export/grid-csv`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || "Export CSV failed");
+  }
+
+  return response.blob();
+}
+ 

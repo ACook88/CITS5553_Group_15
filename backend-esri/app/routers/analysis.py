@@ -10,6 +10,8 @@ from app.services.io_service import dataframe_from_upload, dataframe_from_upload
 from pydantic import BaseModel
 from app.services.comparisons import COMPARISON_METHODS
 from pyproj import Transformer 
+from fastapi.responses import StreamingResponse
+import io
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
@@ -49,6 +51,11 @@ class PlotsResponse(BaseModel):
     original_png: str  # base64 (no data: prefix)
     dl_png: str
     qq_png: str
+
+class PlotsDataResponse(BaseModel):
+    original_data: Dict
+    dl_data: Dict
+    qq_data: Dict
 
 def _clean_series(df: pd.DataFrame, assay_col: str) -> pd.Series:
     if assay_col not in df.columns:
@@ -119,6 +126,82 @@ async def plots(
         qq_png = _fig_to_b64(fig3)
 
         return {"original_png": original_png, "dl_png": dl_png, "qq_png": qq_png}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/plots-data", response_model=PlotsDataResponse)
+async def plots_data(
+    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
+    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
+    original_assay: str  = Form(...),
+    dl_assay: str        = Form(...),
+):
+    try:
+        # read only the assay columns (fast)
+        df_o = dataframe_from_upload_cols(original, [original_assay])
+        df_d = dataframe_from_upload_cols(dl, [dl_assay])
+
+        s_o = _clean_series(df_o, original_assay)
+        s_d = _clean_series(df_d, dl_assay)
+
+        # Original histogram data - match matplotlib exactly
+        bins_o = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
+        hist_o, bin_edges_o = np.histogram(s_o, bins=bins_o)
+        bin_centers_o = (bin_edges_o[:-1] + bin_edges_o[1:]) / 2
+        
+        original_data = {
+            "x": bin_centers_o.tolist(),
+            "y": hist_o.tolist(),
+            "bin_edges": bin_edges_o.tolist(),
+            "title": f"Original {original_assay} Distribution",
+            "xlabel": original_assay,
+            "ylabel": "Count",
+            "log_x": True
+        }
+
+        # DL histogram data - match matplotlib exactly
+        bins_d = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
+        hist_d, bin_edges_d = np.histogram(s_d, bins=bins_d)
+        bin_centers_d = (bin_edges_d[:-1] + bin_edges_d[1:]) / 2
+        
+        dl_data = {
+            "x": bin_centers_d.tolist(),
+            "y": hist_d.tolist(),
+            "bin_edges": bin_edges_d.tolist(),
+            "title": f"DL {dl_assay} Distribution",
+            "xlabel": dl_assay,
+            "ylabel": "Count",
+            "log_x": True
+        }
+
+        # QQ plot data
+        q = np.linspace(0.01, 0.99, 50)
+        qo = np.quantile(s_o, q)
+        qd = np.quantile(s_d, q)
+        
+        # Create reference line data
+        min_val = min(qo.min(), qd.min())
+        max_val = max(qo.max(), qd.max())
+        line_x = np.logspace(np.log10(min_val), np.log10(max_val), 100)
+        line_y = line_x
+        
+        qq_data = {
+            "x": qo.tolist(),
+            "y": qd.tolist(),
+            "line_x": line_x.tolist(),
+            "line_y": line_y.tolist(),
+            "title": "QQ Plot (log–log): Original vs DL",
+            "xlabel": f"Original {original_assay} quantiles",
+            "ylabel": f"DL {dl_assay} quantiles",
+            "log_x": True,
+            "log_y": True
+        }
+
+        return {
+            "original_data": original_data,
+            "dl_data": dl_data,
+            "qq_data": qq_data
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -242,4 +325,289 @@ async def comparison(
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/export/plots")
+async def export_plots(
+    original_file: UploadFile = File(...),
+    dl_file: UploadFile = File(...),
+    original_assay: str = Form(...),
+    dl_assay: str = Form(...),
+    selected_plots: str = Form(...),  # JSON string from the UI
+    # optional heatmap params (sent only when user selects heatmaps)
+    original_northing: str | None = Form(None),
+    original_easting: str | None = Form(None),
+    dl_northing: str | None = Form(None),
+    dl_easting: str | None = Form(None),
+    method: Literal["mean", "median", "max"] | None = Form(None),
+    grid_size: float | None = Form(None),
+):
+    """
+    Regenerates the selected plots and returns them in a ZIP.
+    Histogram + QQ use assay columns only.
+    Heatmaps reuse the same gridding logic as /comparison.
+    """
+    import io, json, zipfile
+
+    try:
+        flags = json.loads(selected_plots)  # { originalHistogram: bool, ... }
+
+        images: list[tuple[str, bytes]] = []
+
+        # ---- 1) Histograms + QQ (if requested) ----
+        if flags.get("originalHistogram") or flags.get("dlHistogram") or flags.get("qqPlot"):
+            df_o = dataframe_from_upload_cols(original_file, [original_assay])
+            df_d = dataframe_from_upload_cols(dl_file, [dl_assay])
+
+            s_o = pd.to_numeric(df_o[original_assay], errors="coerce").dropna()
+            s_o = s_o[s_o > 0]
+            s_d = pd.to_numeric(df_d[dl_assay], errors="coerce").dropna()
+            s_d = s_d[s_d > 0]
+
+            if flags.get("originalHistogram"):
+                fig = plt.figure(figsize=(10, 6))
+                ax = fig.add_subplot(111)
+                bins = np.logspace(np.log10(s_o.min()), np.log10(s_o.max()), 50)
+                ax.hist(s_o, bins=bins, color="#7C3AED", edgecolor="black", linewidth=0.5)
+                ax.set_xscale("log")
+                ax.set_title(f"Original {original_assay} Distribution", fontsize=14, fontweight='bold')
+                ax.set_xlabel(original_assay, fontsize=12); ax.set_ylabel("Count", fontsize=12)
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=150)
+                plt.close(fig); buf.seek(0)
+                images.append(("original_histogram.png", buf.read()))
+
+            if flags.get("dlHistogram"):
+                fig = plt.figure(figsize=(10, 6))
+                ax = fig.add_subplot(111)
+                bins = np.logspace(np.log10(s_d.min()), np.log10(s_d.max()), 50)
+                ax.hist(s_d, bins=bins, color="#7C3AED", edgecolor="black", linewidth=0.5)
+                ax.set_xscale("log")
+                ax.set_title(f"DL {dl_assay} Distribution", fontsize=14, fontweight='bold')
+                ax.set_xlabel(dl_assay, fontsize=12); ax.set_ylabel("Count", fontsize=12)
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=150)
+                plt.close(fig); buf.seek(0)
+                images.append(("dl_histogram.png", buf.read()))
+
+            if flags.get("qqPlot"):
+                q = np.linspace(0.01, 0.99, 50)
+                qo = np.quantile(s_o, q); qd = np.quantile(s_d, q)
+                fig = plt.figure(figsize=(8, 8))
+                ax = fig.add_subplot(111)
+                ax.scatter(qo, qd, s=20, color="#7C3AED")
+                line = np.linspace(min(qo.min(), qd.min()), max(qo.max(), qd.max()), 100)
+                ax.plot(line, line, "--", linewidth=1, color="black")
+                ax.set_xscale("log"); ax.set_yscale("log")
+                ax.set_title("QQ Plot (log–log): Original vs DL", fontsize=14, fontweight='bold')
+                ax.set_xlabel(f"Original {original_assay} quantiles", fontsize=12)
+                ax.set_ylabel(f"DL {dl_assay} quantiles", fontsize=12)
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=150)
+                plt.close(fig); buf.seek(0)
+                images.append(("qq_plot.png", buf.read()))
+
+        # ---- 2) Heatmaps (if any heatmap was requested) ----
+        if flags.get("originalHeatmap") or flags.get("dlHeatmap") or flags.get("comparisonHeatmap"):
+            # Require the mapping + grid params
+            required = [original_northing, original_easting, dl_northing, dl_easting, method, grid_size]
+            if any(v in (None, "") for v in required):
+                raise HTTPException(status_code=400, detail="Heatmaps selected but missing mapping/method/grid parameters.")
+
+            # Reuse the same data cleaning + projection + gridding as /comparison
+            # (these helpers already exist above in this file)
+            df_o = dataframe_from_upload_cols(original_file, [original_easting, original_northing, original_assay])
+            df_d = dataframe_from_upload_cols(dl_file, [dl_easting, dl_northing, dl_assay])
+
+            # clean
+            def _to_float(df, cols):
+                df = df.copy()
+                for c in cols:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                return df.dropna()
+
+            df_o = _to_float(df_o, [original_easting, original_northing, original_assay])
+            df_d = _to_float(df_d, [dl_easting, dl_northing, dl_assay])
+            df_o = df_o[df_o[original_assay] > 0]
+            df_d = df_d[df_d[dl_assay] > 0]
+            if df_o.empty or df_d.empty:
+                raise HTTPException(status_code=400, detail="No valid rows after cleaning for heatmaps.")
+
+            # decide units and possibly project (same logic as /comparison)
+            def _looks_like_degrees(east: pd.Series, north: pd.Series) -> bool:
+                return bool(east.between(-180, 180).all() and north.between(-90, 90).all())
+
+            looks_deg = _looks_like_degrees(
+                pd.concat([df_o[original_easting], df_d[dl_easting]], ignore_index=True),
+                pd.concat([df_o[original_northing], df_d[dl_northing]], ignore_index=True),
+            )
+            use_degrees = looks_deg  # treat_as="auto"
+
+            if use_degrees:
+                transformer = Transformer.from_crs("EPSG:4326", "EPSG:3577", always_xy=True)
+                ex_o, ny_o = transformer.transform(df_o[original_easting].values, df_o[original_northing].values)
+                ex_d, ny_d = transformer.transform(df_d[dl_easting].values, df_d[dl_northing].values)
+                df_o["__E_m"], df_o["__N_m"] = ex_o, ny_o
+                df_d["__E_m"], df_d["__N_m"] = ex_d, ny_d
+                e_col_o, n_col_o = "__E_m", "__N_m"
+                e_col_d, n_col_d = "__E_m", "__N_m"
+            else:
+                e_col_o, n_col_o = original_easting, original_northing
+                e_col_d, n_col_d = dl_easting, dl_northing
+
+            # grid meta (same math as /comparison)
+            def _grid_meta_xy(east, north, cell_x, cell_y):
+                xmin = float(np.floor(east.min() / cell_x) * cell_x)
+                ymin = float(np.floor(north.min() / cell_y) * cell_y)
+                nx = int(((east.max() - xmin) // cell_x) + 1)
+                ny = int(((north.max() - ymin) // cell_y) + 1)
+                return xmin, ymin, nx, ny
+
+            cell_x = cell_y = float(grid_size)
+            xmin, ymin, nx, ny = _grid_meta_xy(
+                pd.concat([df_o[e_col_o], df_d[e_col_d]], ignore_index=True),
+                pd.concat([df_o[n_col_o], df_d[n_col_d]], ignore_index=True),
+                cell_x, cell_y
+            )
+
+            # index into grid and rename assay to Te_ppm to match comparison convention
+            def _index_cols_xy(df, easting, northing, xmin, ymin, cell_x, cell_y):
+                df = df.copy()
+                df["grid_ix"] = ((df[easting] - xmin) // cell_x).astype(int)
+                df["grid_iy"] = ((df[northing] - ymin) // cell_y).astype(int)
+                return df
+
+            o_idx = _index_cols_xy(df_o, e_col_o, n_col_o, xmin, ymin, cell_x, cell_y).rename(columns={original_assay: "Te_ppm"})
+            d_idx = _index_cols_xy(df_d, e_col_d, n_col_d, xmin, ymin, cell_x, cell_y).rename(columns={dl_assay: "Te_ppm"})
+
+            # aggregate via registry (same as /comparison)
+            fn = COMPARISON_METHODS[method]  # type: ignore[arg-type]
+            arr_orig, arr_dl, arr_cmp = fn(d_idx, o_idx, nx, ny)
+
+            # draw heatmaps
+            x = xmin + (np.arange(nx) + 0.5) * cell_x
+            y = ymin + (np.arange(ny) + 0.5) * cell_y
+
+            # Downsample overlay points (same as interactive plots)
+            def _downsample(df, n=5000):
+                return df.sample(n=min(n, len(df)), random_state=42)
+            o_pts = _downsample(o_idx)[[e_col_o, n_col_o]].values
+            d_pts = _downsample(d_idx)[[e_col_d, n_col_d]].values
+
+            def _save_fig(fig, name):
+                b = io.BytesIO(); fig.tight_layout(pad=2.0); fig.savefig(b, format="png", dpi=150); plt.close(fig); b.seek(0)
+                images.append((name, b.read()))
+
+            if flags.get("originalHeatmap"):
+                fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
+                z = np.where(np.isfinite(arr_orig) & (arr_orig > 0), np.log10(arr_orig), np.nan)
+                im = ax.imshow(z.T, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()], 
+                              aspect="equal", cmap="viridis", vmin=-2, vmax=3)
+                # Add black dots for data points
+                ax.scatter(df_o[e_col_o], df_o[n_col_o], c='black', s=4, alpha=0.7, marker='o')
+                ax.set_title("Original (log10)", fontsize=14, fontweight='bold')
+                ax.set_xlabel("Easting (m)", fontsize=12)
+                ax.set_ylabel("Northing (m)", fontsize=12)
+                
+                # Format axes with thousands separators
+                ax.ticklabel_format(style='plain', axis='both')
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+                
+                # Rotate x-axis labels to prevent overlap
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+                
+                # Add grid
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+                
+                # Create colorbar with proper formatting
+                cbar = fig.colorbar(im, ax=ax, label=f"Max {original_assay} (log scale)")
+                cbar.set_label(f"Max {original_assay} (log scale)", fontsize=12)
+                # Set colorbar ticks to match interactive plot
+                cbar.set_ticks([-2, -1, 0, 1, 2, 3])
+                cbar.set_ticklabels(['10⁻²', '10⁻¹', '10⁰', '10¹', '10²', '10³'])
+                
+                _save_fig(fig, "original_heatmap.png")
+
+            if flags.get("dlHeatmap"):
+                fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
+                z = np.where(np.isfinite(arr_dl) & (arr_dl > 0), np.log10(arr_dl), np.nan)
+                im = ax.imshow(z.T, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()], 
+                              aspect="equal", cmap="viridis", vmin=-2, vmax=3)
+                # Add black dots for data points
+                ax.scatter(d_pts[:, 0], d_pts[:, 1], c='black', s=4, alpha=0.7, marker='o')
+                ax.set_title("DL (log10)", fontsize=14, fontweight='bold')
+                ax.set_xlabel("Easting (m)", fontsize=12)
+                ax.set_ylabel("Northing (m)", fontsize=12)
+                
+                # Format axes with thousands separators
+                ax.ticklabel_format(style='plain', axis='both')
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+                
+                # Rotate x-axis labels to prevent overlap
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+                
+                # Add grid
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+                
+                # Create colorbar with proper formatting
+                cbar = fig.colorbar(im, ax=ax, label=f"Max {dl_assay} (log scale)")
+                cbar.set_label(f"Max {dl_assay} (log scale)", fontsize=12)
+                # Set colorbar ticks to match interactive plot
+                cbar.set_ticks([-2, -1, 0, 1, 2, 3])
+                cbar.set_ticklabels(['10⁻²', '10⁻¹', '10⁰', '10¹', '10²', '10³'])
+                
+                _save_fig(fig, "dl_heatmap.png")
+
+            if flags.get("comparisonHeatmap"):
+                fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
+                vmax = 100.0
+                im = ax.imshow(arr_cmp.T, origin="lower", vmin=-vmax, vmax=vmax, cmap="RdBu_r",
+                               extent=[x.min(), x.max(), y.min(), y.max()], aspect="equal")
+                # Add black dots for both original and DL data points
+                ax.scatter(o_pts[:, 0], o_pts[:, 1], c='black', s=4, alpha=0.7, marker='o', label='Original')
+                ax.scatter(d_pts[:, 0], d_pts[:, 1], c='black', s=4, alpha=0.7, marker='o', label='DL')
+                ax.set_title("Comparison (DL − Original)", fontsize=14, fontweight='bold')
+                ax.set_xlabel("Easting (m)", fontsize=12)
+                ax.set_ylabel("Northing (m)", fontsize=12)
+                
+                # Format axes with thousands separators
+                ax.ticklabel_format(style='plain', axis='both')
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+                
+                # Rotate x-axis labels to prevent overlap
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+                
+                # Add grid
+                ax.grid(True, alpha=0.3, linewidth=0.5)
+                
+                # Create colorbar with proper formatting
+                cbar = fig.colorbar(im, ax=ax, label="Δ Te_ppm")
+                cbar.set_label("Δ Te_ppm", fontsize=12)
+                # Set colorbar ticks to match interactive plot
+                cbar.set_ticks([-100, -75, -50, -25, 0, 25, 50, 75, 100])
+                
+                _save_fig(fig, "comparison_heatmap.png")
+
+        # ---- 3) Package everything requested into a ZIP ----
+        if not images:
+            raise HTTPException(status_code=400, detail="No plots were selected.")
+
+        zbuf = io.BytesIO()
+        with zipfile.ZipFile(zbuf, "w") as zf:
+            for fname, data in images:
+                zf.writestr(fname, data)
+        zbuf.seek(0)
+        return StreamingResponse(
+            zbuf,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=plots.zip"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
