@@ -1,25 +1,14 @@
 // frontend-esri/src/api/analysis.ts
 // Helpers for calling analysis endpoints.
-// Includes: runSummary, runPlotsData, runComparison, runComparisonFiles, exportPlots
-// NOTE: This version pairs rows for comparison using the *user-selected* coordinate
-// columns (northing/easting) and assay columns — matching the backend changes.
 
 export type SummaryResponse = {
-  original: {
-    rows: number;
-    cols: string[];
-    value_stats?: Record<string, number>;
-  };
-  dl: {
-    rows: number;
-    cols: string[];
-    value_stats?: Record<string, number>;
-  };
+  original: { rows: number; cols: string[]; value_stats?: Record<string, number> };
+  dl:       { rows: number; cols: string[]; value_stats?: Record<string, number> };
 };
 
 export type SelectedColumns = {
   orig: { easting: string; northing: string; assay: string };
-  dl: { easting: string; northing: string; assay: string };
+  dl:   { easting: string; northing: string; assay: string };
 };
 
 export type ComparisonResponse = {
@@ -27,34 +16,25 @@ export type ComparisonResponse = {
   preview: Array<Record<string, unknown>>;
   scatter: { x: number[]; y: number[]; x_label: string; y_label: string };
   residuals: { values: number[]; label: string };
-  // present only when using /run_comparison_files
   run_token?: string;
 };
 
-// Some components in your app import PlotData from here; this maps to what we return.
 export type PlotData = ComparisonResponse;
 
-const API =
-  (import.meta as any).env?.VITE_API_BASE || "http://localhost:8000";
+const API = (import.meta as any).env?.VITE_API_BASE || "http://localhost:8000";
 
 async function jsonOrThrow<T = any>(res: Response): Promise<T> {
   if (!res.ok) {
-    // try to surface backend detail if present
-    let detail: any = "";
+    let detail = "";
     try {
       const j = await res.json();
       detail = j?.detail || JSON.stringify(j);
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
     throw new Error(`HTTP ${res.status} ${res.statusText}${detail ? ` — ${detail}` : ""}`);
   }
   return (await res.json()) as T;
 }
 
-/**
- * Get high-level stats for each dataframe (rows, columns, optional value stats)
- */
 export async function runSummary(
   run_token: string,
   value_column?: string
@@ -68,45 +48,40 @@ export async function runSummary(
 }
 
 /**
- * Convenience wrapper used by some UIs that expect "plots data" preloaded.
- * Currently proxies to runSummary (extend if you add more plots server-side).
- */
-export async function runPlotsData(
-  run_token: string,
-  opts?: { value_column?: string }
-): Promise<SummaryResponse> {
-  return runSummary(run_token, opts?.value_column);
-}
-
-/**
  * Main comparison call — pairs rows using the user-selected columns.
- * Returns scatter (orig vs dl) and residuals (dl - orig).
  */
 export async function runComparison(
   run_token: string,
   selected: SelectedColumns,
   rounding: number = 6
 ): Promise<ComparisonResponse> {
+  // Guard: fail early if UI selections are missing
+  const req: Record<string, string | number> = {
+    run_token,
+    orig_x: selected?.orig?.easting ?? "",
+    orig_y: selected?.orig?.northing ?? "",
+    orig_val: selected?.orig?.assay ?? "",
+    dl_x: selected?.dl?.easting ?? "",
+    dl_y: selected?.dl?.northing ?? "",
+    dl_val: selected?.dl?.assay ?? "",
+    rounding,
+  };
+  for (const k of ["orig_x","orig_y","orig_val","dl_x","dl_y","dl_val"]) {
+    if (!String(req[k]).trim()) {
+      throw new Error(`Missing required selection: ${k}`);
+    }
+  }
+
   const res = await fetch(`${API}/api/analysis/run_comparison`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      run_token,
-      orig_x: selected.orig.easting,
-      orig_y: selected.orig.northing,
-      orig_val: selected.orig.assay,
-      dl_x: selected.dl.easting,
-      dl_y: selected.dl.northing,
-      dl_val: selected.dl.assay,
-      rounding,
-    }),
+    body: JSON.stringify(req),
   });
   return jsonOrThrow<ComparisonResponse>(res);
 }
 
 /**
- * Optional helper if you want to POST the two CSVs directly instead of using a run_token.
- * (Useful for ad-hoc tests or when skipping the /api/data/columns step.)
+ * Post two CSVs directly (bypasses run_token). Handy for testing.
  */
 export async function runComparisonFiles(
   originalFile: File,
@@ -132,10 +107,6 @@ export async function runComparisonFiles(
   return jsonOrThrow<ComparisonResponse>(res);
 }
 
-/**
- * Export the merged comparison dataset (as base64 CSV payload).
- * Your UI can decode and trigger a download.
- */
 export async function exportPlots(args: {
   run_token: string;
   filename?: string;
