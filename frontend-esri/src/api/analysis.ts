@@ -1,228 +1,161 @@
-const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// frontend-esri/src/api/analysis.ts
+// Helpers for calling analysis endpoints.
+// Includes: runSummary, runPlotsData, runComparison, runComparisonFiles, exportPlots
+// NOTE: This version pairs rows for comparison using the *user-selected* coordinate
+// columns (northing/easting) and assay columns — matching the backend changes.
 
-export type Summary = {
-  count: number;
-  mean: number | null;
-  median: number | null;
-  max: number | null;
-  std: number | null;
+export type SummaryResponse = {
+  original: {
+    rows: number;
+    cols: string[];
+    value_stats?: Record<string, number>;
+  };
+  dl: {
+    rows: number;
+    cols: string[];
+    value_stats?: Record<string, number>;
+  };
 };
 
+export type SelectedColumns = {
+  orig: { easting: string; northing: string; assay: string };
+  dl: { easting: string; northing: string; assay: string };
+};
+
+export type ComparisonResponse = {
+  n_pairs: number;
+  preview: Array<Record<string, unknown>>;
+  scatter: { x: number[]; y: number[]; x_label: string; y_label: string };
+  residuals: { values: number[]; label: string };
+  // present only when using /run_comparison_files
+  run_token?: string;
+};
+
+// Some components in your app import PlotData from here; this maps to what we return.
+export type PlotData = ComparisonResponse;
+
+const API =
+  (import.meta as any).env?.VITE_API_BASE || "http://localhost:8000";
+
+async function jsonOrThrow<T = any>(res: Response): Promise<T> {
+  if (!res.ok) {
+    // try to surface backend detail if present
+    let detail: any = "";
+    try {
+      const j = await res.json();
+      detail = j?.detail || JSON.stringify(j);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`HTTP ${res.status} ${res.statusText}${detail ? ` — ${detail}` : ""}`);
+  }
+  return (await res.json()) as T;
+}
+
+/**
+ * Get high-level stats for each dataframe (rows, columns, optional value stats)
+ */
 export async function runSummary(
-  originalFile: File,
-  dlFile: File,
-  originalAssay: string,
-  dlAssay: string
-): Promise<{ original: Summary; dl: Summary }> {
-  const form = new FormData();
-  form.append("original", originalFile);
-  form.append("dl", dlFile);
-  form.append("original_assay", originalAssay);
-  form.append("dl_assay", dlAssay);
-
-  const res = await fetch(`${API}/api/analysis/summary`, {
+  run_token: string,
+  value_column?: string
+): Promise<SummaryResponse> {
+  const res = await fetch(`${API}/api/analysis/run_summary`, {
     method: "POST",
-    body: form,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_token, value_column }),
   });
-
-  // Defensive: read as text first to avoid JSON parse crashes masking the real error
-  const text = await res.text();
-
-  if (!res.ok) {
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-
-  let data: any;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`Backend returned non-JSON: ${text.slice(0, 200)}`);
-  }
-
-  if (!data?.original || !data?.dl) {
-    throw new Error("Malformed response: missing 'original' or 'dl'");
-  }
-
-  return data;
+  return jsonOrThrow<SummaryResponse>(res);
 }
 
-export async function runPlots(
-  originalFile: File,
-  dlFile: File,
-  originalAssay: string,
-  dlAssay: string
-): Promise<{ original_png: string; dl_png: string; qq_png: string }> {
-  const form = new FormData();
-  form.append("original", originalFile);
-  form.append("dl", dlFile);
-  form.append("original_assay", originalAssay);
-  form.append("dl_assay", dlAssay);
-
-  const res = await fetch(`${API}/api/analysis/plots`, {
-    method: "POST",
-    body: form,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export type PlotData = {
-  x: number[];
-  y: number[];
-  bin_edges?: number[];
-  title: string;
-  xlabel: string;
-  ylabel: string;
-  log_x: boolean;
-  log_y?: boolean;
-  line_x?: number[];
-  line_y?: number[];
-};
-
-export type PlotsDataResponse = {
-  original_data: PlotData;
-  dl_data: PlotData;
-  qq_data: PlotData;
-};
-
+/**
+ * Convenience wrapper used by some UIs that expect "plots data" preloaded.
+ * Currently proxies to runSummary (extend if you add more plots server-side).
+ */
 export async function runPlotsData(
+  run_token: string,
+  opts?: { value_column?: string }
+): Promise<SummaryResponse> {
+  return runSummary(run_token, opts?.value_column);
+}
+
+/**
+ * Main comparison call — pairs rows using the user-selected columns.
+ * Returns scatter (orig vs dl) and residuals (dl - orig).
+ */
+export async function runComparison(
+  run_token: string,
+  selected: SelectedColumns,
+  rounding: number = 6
+): Promise<ComparisonResponse> {
+  const res = await fetch(`${API}/api/analysis/run_comparison`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_token,
+      orig_x: selected.orig.easting,
+      orig_y: selected.orig.northing,
+      orig_val: selected.orig.assay,
+      dl_x: selected.dl.easting,
+      dl_y: selected.dl.northing,
+      dl_val: selected.dl.assay,
+      rounding,
+    }),
+  });
+  return jsonOrThrow<ComparisonResponse>(res);
+}
+
+/**
+ * Optional helper if you want to POST the two CSVs directly instead of using a run_token.
+ * (Useful for ad-hoc tests or when skipping the /api/data/columns step.)
+ */
+export async function runComparisonFiles(
   originalFile: File,
   dlFile: File,
-  originalAssay: string,
-  dlAssay: string
-): Promise<PlotsDataResponse> {
+  selected: SelectedColumns,
+  rounding: number = 6
+): Promise<ComparisonResponse> {
   const form = new FormData();
   form.append("original", originalFile);
   form.append("dl", dlFile);
-  form.append("original_assay", originalAssay);
-  form.append("dl_assay", dlAssay);
+  form.append("orig_x", selected.orig.easting);
+  form.append("orig_y", selected.orig.northing);
+  form.append("orig_val", selected.orig.assay);
+  form.append("dl_x", selected.dl.easting);
+  form.append("dl_y", selected.dl.northing);
+  form.append("dl_val", selected.dl.assay);
+  form.append("rounding", String(rounding));
 
-  const res = await fetch(`${API}/api/analysis/plots-data`, {
+  const res = await fetch(`${API}/api/analysis/run_comparison_files`, {
     method: "POST",
     body: form,
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  return jsonOrThrow<ComparisonResponse>(res);
 }
 
-export async function runComparison(
-  originalFile: File,
-  dlFile: File,
-  map: {
-    oN: string;
-    oE: string;
-    oA: string;
-    dN: string;
-    dE: string;
-    dA: string;
-  },
-  method: "mean" | "median" | "max",
-  gridSize: number
-) {
-  const fd = new FormData();
-  fd.append("original", originalFile);
-  fd.append("dl", dlFile);
-
-  // MUST match FastAPI field names exactly
-  fd.append("original_northing", map.oN);
-  fd.append("original_easting", map.oE);
-  fd.append("original_assay", map.oA);
-  fd.append("dl_northing", map.dN);
-  fd.append("dl_easting", map.dE);
-  fd.append("dl_assay", map.dA);
-
-  fd.append("method", method);
-  fd.append("grid_size", String(gridSize));
-
-  const res = await fetch(`${API}/api/analysis/comparison`, {
+/**
+ * Export the merged comparison dataset (as base64 CSV payload).
+ * Your UI can decode and trigger a download.
+ */
+export async function exportPlots(args: {
+  run_token: string;
+  filename?: string;
+  selected: SelectedColumns;
+  rounding?: number;
+}): Promise<{ filename: string; bytes_b64: string; n_rows: number }> {
+  const res = await fetch(`${API}/api/analysis/export_plots`, {
     method: "POST",
-    body: fd,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_token: args.run_token,
+      filename: args.filename || "comparison_export.csv",
+      orig_x: args.selected.orig.easting,
+      orig_y: args.selected.orig.northing,
+      orig_val: args.selected.orig.assay,
+      dl_x: args.selected.dl.easting,
+      dl_y: args.selected.dl.northing,
+      dl_val: args.selected.dl.assay,
+      rounding: args.rounding ?? 6,
+    }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail ?? `Comparison failed (${res.status})`);
-  }
-  return res.json();
+  return jsonOrThrow(res);
 }
-
-export async function exportPlots(
-  originalFile: File,
-  dlFile: File,
-  originalAssay: string,
-  dlAssay: string,
-  selectedPlots: Record<string, boolean>,
-  // Optional parameters for heatmap generation
-  originalNorthing?: string,
-  originalEasting?: string,
-  dlNorthing?: string,
-  dlEasting?: string,
-  method?: string,
-  gridSize?: number
-): Promise<Blob> {
-  const formData = new FormData();
-  formData.append("original_file", originalFile);
-  formData.append("dl_file", dlFile);
-  formData.append("original_assay", originalAssay);
-  formData.append("dl_assay", dlAssay);
-  formData.append("selected_plots", JSON.stringify(selectedPlots));
-  
-  // Add heatmap parameters if provided
-  if (originalNorthing) formData.append("original_northing", originalNorthing);
-  if (originalEasting) formData.append("original_easting", originalEasting);
-  if (dlNorthing) formData.append("dl_northing", dlNorthing);
-  if (dlEasting) formData.append("dl_easting", dlEasting);
-  if (method) formData.append("method", method);
-  if (gridSize !== undefined) formData.append("grid_size", gridSize.toString());
-
-  const response = await fetch(`${API}/api/analysis/export/plots`, {
-    method: "POST",
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.detail || "Export plots failed");
-  }
-
-  return response.blob();
-}
-
-export async function exportGridCSV(
-  originalFile: File,
-  dlFile: File,
-  mapping: {
-    oN: string;
-    oE: string;
-    oA: string;
-    dN: string;
-    dE: string;
-    dA: string;
-  },
-  method: "max" | "mean" | "median",
-  gridSize: number
-): Promise<Blob> {
-  const formData = new FormData();
-  formData.append("original_file", originalFile);
-  formData.append("dl_file", dlFile);
-  formData.append("original_northing", mapping.oN);
-  formData.append("original_easting", mapping.oE);
-  formData.append("original_assay", mapping.oA);
-  formData.append("dl_northing", mapping.dN);
-  formData.append("dl_easting", mapping.dE);
-  formData.append("dl_assay", mapping.dA);
-  formData.append("method", method);
-  formData.append("grid_size", gridSize.toString());
-
-  const response = await fetch(`${API}/api/analysis/export/grid-csv`, {
-    method: "POST",
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.detail || "Export CSV failed");
-  }
-
-  return response.blob();
-}
- 
