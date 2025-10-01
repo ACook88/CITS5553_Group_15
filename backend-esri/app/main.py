@@ -5,14 +5,15 @@ import os
 
 app = FastAPI(title="CITS5553 API")
 
-# Comma-separated list, e.g.
-# ALLOW_ORIGINS=https://your-frontend.onrender.com,https://another-site.com
-_allow_origins = os.getenv("ALLOW_ORIGINS", "*").strip()
-if _allow_origins == "*":
+# Allow one or more origins via env:
+# ALLOW_ORIGINS="https://your-frontend.onrender.com,http://localhost:5173"
+allow_origins_env = os.getenv("ALLOW_ORIGINS", "*").strip()
+
+if allow_origins_env == "*":
     allow_origins = ["*"]
-    allow_credentials = False  # cannot use credentials with wildcard
+    allow_credentials = False  # wildcard cannot be used with credentials
 else:
-    allow_origins = [o.strip() for o in _allow_origins.split(",") if o.strip()]
+    allow_origins = [o.strip() for o in allow_origins_env.split(",") if o.strip()]
     allow_credentials = os.getenv("ALLOW_CREDENTIALS", "false").lower() == "true"
 
 app.add_middleware(
