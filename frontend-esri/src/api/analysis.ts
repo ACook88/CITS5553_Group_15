@@ -81,6 +81,18 @@ export async function runComparison(
 }
 
 /**
+ * Compatibility wrapper for older code paths.
+ * Some components import runPlotsData; keep the API the same by delegating to runComparison.
+ */
+export async function runPlotsData(
+  run_token: string,
+  selected: SelectedColumns,
+  rounding: number = 6
+): Promise<PlotData> {
+  return runComparison(run_token, selected, rounding);
+}
+
+/**
  * Post two CSVs directly (bypasses run_token). Handy for testing.
  */
 export async function runComparisonFiles(
