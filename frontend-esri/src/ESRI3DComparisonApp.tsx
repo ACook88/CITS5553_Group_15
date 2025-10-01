@@ -223,6 +223,7 @@ export default function ESRI3DComparisonApp() {
     []
   );
 
+
   const handleInput = (
     e: React.ChangeEvent<HTMLInputElement>,
     kind: "original" | "dl"
@@ -1056,6 +1057,11 @@ export default function ESRI3DComparisonApp() {
                           <Plot
                             {...createHistogramPlot(plotsData.original)}
                             style={{ width: "100%", height: 600 }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"], // hide camera
+                            }}
                           />
                         ) : (
                           <div className="h-[600px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
@@ -1071,6 +1077,11 @@ export default function ESRI3DComparisonApp() {
                           <Plot
                             {...createHistogramPlot(plotsData.dl)}
                             style={{ width: "100%", height: 600 }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
                           />
                         ) : (
                           <div className="h-[600px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
@@ -1086,6 +1097,11 @@ export default function ESRI3DComparisonApp() {
                           <Plot
                             {...createQQPlot(plotsData.qq)}
                             style={{ width: "100%", height: 600 }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
                           />
                         ) : (
                           <div className="h-[600px] grid place-items-center text-sm text-neutral-500 bg-[#F9FAFB] rounded-xl border border-neutral-100">
@@ -1246,7 +1262,11 @@ export default function ESRI3DComparisonApp() {
                           ...axesLikeNotebook(gridOut),
                           autosize: true,
                         }}
-                        config={{ responsive: true, displaylogo: false }}
+                        config={{
+                          responsive: true,
+                          displaylogo: false,
+                          modeBarButtonsToRemove: ["toImage"],
+                        }}
                         style={{ width: "100%", height: PLOT_HEIGHT }}
                       />
                     </div>
@@ -1298,7 +1318,11 @@ export default function ESRI3DComparisonApp() {
                           ...axesLikeNotebook(gridOut),
                           autosize: true,
                         }}
-                        config={{ responsive: true, displaylogo: false }}
+                        config={{
+                          responsive: true,
+                          displaylogo: false,
+                          modeBarButtonsToRemove: ["toImage"],
+                        }}
                         style={{ width: "100%", height: PLOT_HEIGHT }}
                       />
                     </div>
@@ -1368,7 +1392,11 @@ export default function ESRI3DComparisonApp() {
                               ...axesLikeNotebook(gridOut),
                               autosize: true,
                             }}
-                            config={{ responsive: true, displaylogo: false }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
                             style={{ width: "100%", height: PLOT_HEIGHT }}
                           />
                         );
@@ -2303,26 +2331,4 @@ function axesLikeNotebook(gridOut: {
     },
     margin: { l: 76, r: 76, b: 62, t: 90 }, // t: 90 leaves more space above grid for title
   };
-}
-
-// Utility to download a Plotly plot as image (PNG)
-function downloadPlotImage(
-  plotDiv: HTMLDivElement | null,
-  filename = "plot.png"
-) {
-  if (!plotDiv) return;
-  Plotly.toImage(plotDiv, {
-    format: "png",
-    height: 600,
-    width: plotDiv.offsetWidth || 900,
-  }).then((dataUrl: string) => {
-    const a = document.createElement("a");
-    a.href = dataUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      if (document.body.contains(a)) document.body.removeChild(a);
-    }, 100);
-  });
 }
