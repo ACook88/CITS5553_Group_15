@@ -23,6 +23,14 @@ export type PlotData = ComparisonResponse;
 
 const API = (import.meta as any).env?.VITE_API_BASE || "http://localhost:8000";
 
+function getStoredRunToken(): string | null {
+  try {
+    return localStorage.getItem("run_token");
+  } catch {
+    return null;
+  }
+}
+
 async function jsonOrThrow<T = any>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = "";
@@ -36,28 +44,35 @@ async function jsonOrThrow<T = any>(res: Response): Promise<T> {
 }
 
 export async function runSummary(
-  run_token: string,
+  run_token?: string,
   value_column?: string
 ): Promise<SummaryResponse> {
+  const token = run_token || getStoredRunToken();
+  if (!token) throw new Error("No run_token available. Load data first.");
+
   const res = await fetch(`${API}/api/analysis/run_summary`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ run_token, value_column }),
+    body: JSON.stringify({ run_token: token, value_column }),
   });
   return jsonOrThrow<SummaryResponse>(res);
 }
 
 /**
  * Main comparison call — pairs rows using the user-selected columns.
+ * If run_token is not provided, it will be read from localStorage.
  */
 export async function runComparison(
-  run_token: string,
+  run_token: string | undefined,
   selected: SelectedColumns,
   rounding: number = 6
 ): Promise<ComparisonResponse> {
+  const token = run_token || getStoredRunToken();
+  if (!token) throw new Error("No run_token available. Load data first.");
+
   // Guard: fail early if UI selections are missing
   const req: Record<string, string | number> = {
-    run_token,
+    run_token: token,
     orig_x: selected?.orig?.easting ?? "",
     orig_y: selected?.orig?.northing ?? "",
     orig_val: selected?.orig?.assay ?? "",
@@ -82,10 +97,9 @@ export async function runComparison(
 
 /**
  * Compatibility wrapper for older code paths.
- * Some components import runPlotsData; keep the API the same by delegating to runComparison.
  */
 export async function runPlotsData(
-  run_token: string,
+  run_token: string | undefined,
   selected: SelectedColumns,
   rounding: number = 6
 ): Promise<PlotData> {
@@ -120,16 +134,19 @@ export async function runComparisonFiles(
 }
 
 export async function exportPlots(args: {
-  run_token: string;
+  run_token?: string;
   filename?: string;
   selected: SelectedColumns;
   rounding?: number;
 }): Promise<{ filename: string; bytes_b64: string; n_rows: number }> {
+  const token = args.run_token || getStoredRunToken();
+  if (!token) throw new Error("No run_token available. Load data first.");
+
   const res = await fetch(`${API}/api/analysis/export_plots`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      run_token: args.run_token,
+      run_token: token,
       filename: args.filename || "comparison_export.csv",
       orig_x: args.selected.orig.easting,
       orig_y: args.selected.orig.northing,
