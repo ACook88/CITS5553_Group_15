@@ -122,6 +122,17 @@ export default function ESRI3DComparisonApp() {
   const [method, setMethod] = useState<null | "max" | "mean" | "median">(null);
   const [gridSize, setGridSize] = useState<number | null>(100000);
 
+  // Legend configuration
+  const [legendConfig, setLegendConfig] = useState<{
+    original: { min: number | null; max: number | null; auto: boolean };
+    dl: { min: number | null; max: number | null; auto: boolean };
+    comparison: { min: number | null; max: number | null; auto: boolean };
+  }>({
+    original: { min: null, max: null, auto: true },
+    dl: { min: null, max: null, auto: true },
+    comparison: { min: null, max: null, auto: true },
+  });
+
   // Run state
   const [runId, setRunId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -305,6 +316,10 @@ export default function ESRI3DComparisonApp() {
     const purpleMat = new THREE.MeshStandardMaterial({ color: 0x7c3aed });
     const amberMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b });
     const cube1 = new THREE.Mesh(cubeGeo, purpleMat);
+    const cube2 = new THREE.Mesh(cubeGeo, amberMat);
+    cube2.position.set(-2, 0, 0);
+    scene.add(cube1);
+    scene.add(cube2);
 
     const clock = new THREE.Clock();
     const animate = () => {
@@ -679,6 +694,12 @@ export default function ESRI3DComparisonApp() {
     setBusyRun(false);
     setUnzipping(false);
     setGridOut(null); // NEW: clear plots when resetting comparison
+    // Reset legend configuration
+    setLegendConfig({
+      original: { min: null, max: null, auto: true },
+      dl: { min: null, max: null, auto: true },
+      comparison: { min: null, max: null, auto: true },
+    });
     // Dispose three.js visualization and clear plotRef
     if (threeRef.current) safelyDisposeThree(plotRef.current);
     if (plotRef.current && plotRef.current.firstChild) {
@@ -1156,6 +1177,14 @@ export default function ESRI3DComparisonApp() {
                   gridSize={gridSize}
                   onGridSizeChange={analysisRun ? setGridSize : () => {}}
                 />
+                {method && gridOut && (
+                  <LegendControls
+                    method={method}
+                    legendConfig={legendConfig}
+                    onLegendConfigChange={setLegendConfig}
+                    gridOut={gridOut}
+                  />
+                )}
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -1214,117 +1243,137 @@ export default function ESRI3DComparisonApp() {
                       <div className="text-sm font-medium mb-2">
                         Original heatmap
                       </div>
-                      <Plot
-                        data={[
-                          {
-                            x: gridOut.x,
-                            y: gridOut.y,
-                            z: gridOut.orig.map((row: (number | null)[]) =>
-                              row.map((v) =>
-                                v && v > 0 ? Math.log10(v) : null
-                              )
-                            ),
-                            type: "heatmap",
-                            hoverongaps: false,
-                            colorscale: "Viridis",
-                            zmin: POW_TICKS[0],
-                            zmax: POW_TICKS[POW_TICKS.length - 1],
-                            colorbar: {
-                              title: `Max ${
-                                originalMap.Assay || "Assay"
-                              } (log scale)`,
-                              tickmode: "array",
-                              tickvals: POW_TICKS as unknown as number[],
-                              ticktext: powTickText(POW_TICKS),
-                              len: 0.8,
-                              thickness: 24,
-                              outlinewidth: 1,
-                              x: 1.02,
-                              y: 0.5,
-                              yanchor: "middle",
-                            },
-                          },
-                          gridOut.original_points && {
-                            x: gridOut.original_points.map(
-                              (p: number[]) => p[0]
-                            ),
-                            y: gridOut.original_points.map(
-                              (p: number[]) => p[1]
-                            ),
-                            type: "scattergl",
-                            mode: "markers",
-                            marker: { size: 4, color: "black", opacity: 0.7 },
-                            hoverinfo: "skip",
-                            name: "Samples",
-                          },
-                        ].filter(Boolean)}
-                        layout={{
-                          ...axesLikeNotebook(gridOut),
-                          autosize: true,
-                        }}
-                        config={{
-                          responsive: true,
-                          displaylogo: false,
-                          modeBarButtonsToRemove: ["toImage"],
-                        }}
-                        style={{ width: "100%", height: PLOT_HEIGHT }}
-                      />
+                      {(() => {
+                        const originalRange = getLegendRange(
+                          "original",
+                          gridOut.orig,
+                          legendConfig.original,
+                          method
+                        );
+                        return (
+                          <Plot
+                            data={[
+                              {
+                                x: gridOut.x,
+                                y: gridOut.y,
+                                z: gridOut.orig.map((row: (number | null)[]) =>
+                                  row.map((v) =>
+                                    v && v > 0 ? Math.log10(v) : null
+                                  )
+                                ),
+                                type: "heatmap",
+                                hoverongaps: false,
+                                colorscale: "Viridis",
+                                zmin: originalRange.min,
+                                zmax: originalRange.max,
+                                colorbar: {
+                                  title: `Max ${
+                                    originalMap.Assay || "Assay"
+                                  } (log scale)`,
+                                  tickmode: originalRange.ticks ? "array" : "auto",
+                                  tickvals: originalRange.ticks,
+                                  ticktext: originalRange.tickText,
+                                  len: 0.8,
+                                  thickness: 24,
+                                  outlinewidth: 1,
+                                  x: 1.02,
+                                  y: 0.5,
+                                  yanchor: "middle",
+                                },
+                              },
+                              gridOut.original_points && {
+                                x: gridOut.original_points.map(
+                                  (p: number[]) => p[0]
+                                ),
+                                y: gridOut.original_points.map(
+                                  (p: number[]) => p[1]
+                                ),
+                                type: "scattergl",
+                                mode: "markers",
+                                marker: { size: 4, color: "black", opacity: 0.7 },
+                                hoverinfo: "skip",
+                                name: "Samples",
+                              },
+                            ].filter(Boolean)}
+                            layout={{
+                              ...axesLikeNotebook(gridOut),
+                              autosize: true,
+                            }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
+                            style={{ width: "100%", height: PLOT_HEIGHT }}
+                          />
+                        );
+                      })()}
                     </div>
 
                     {/* DL (log10) */}
                     <div className="rounded-2xl border border-gray-200 p-3">
                       <div className="text-sm font-medium mb-2">DL heatmap</div>
-                      <Plot
-                        data={[
-                          {
-                            x: gridOut.x,
-                            y: gridOut.y,
-                            z: gridOut.dl.map((row: (number | null)[]) =>
-                              row.map((v) =>
-                                v && v > 0 ? Math.log10(v) : null
-                              )
-                            ),
-                            type: "heatmap",
-                            hoverongaps: false,
-                            colorscale: "Viridis",
-                            zmin: POW_TICKS[0],
-                            zmax: POW_TICKS[POW_TICKS.length - 1],
-                            colorbar: {
-                              title: `Max ${
-                                dlMap.Assay || "Assay"
-                              } (log scale)`,
-                              tickmode: "array",
-                              tickvals: POW_TICKS as unknown as number[],
-                              ticktext: powTickText(POW_TICKS),
-                              len: 0.8,
-                              thickness: 24,
-                              outlinewidth: 1,
-                              x: 1.02,
-                              y: 0.5,
-                              yanchor: "middle",
-                            },
-                          },
-                          gridOut.dl_points && {
-                            x: gridOut.dl_points.map((p: number[]) => p[0]),
-                            y: gridOut.dl_points.map((p: number[]) => p[1]),
-                            type: "scattergl",
-                            mode: "markers",
-                            marker: { size: 4, color: "black", opacity: 0.7 },
-                            hoverinfo: "skip",
-                            name: "Samples",
-                          },
-                        ].filter(Boolean)}
-                        layout={{
-                          ...axesLikeNotebook(gridOut),
-                          autosize: true,
-                        }}
-                        config={{
-                          responsive: true,
-                          displaylogo: false,
-                          modeBarButtonsToRemove: ["toImage"],
-                        }}
-                        style={{ width: "100%", height: PLOT_HEIGHT }}
-                      />
+                      {(() => {
+                        const dlRange = getLegendRange(
+                          "dl",
+                          gridOut.dl,
+                          legendConfig.dl,
+                          method
+                        );
+                        return (
+                          <Plot
+                            data={[
+                              {
+                                x: gridOut.x,
+                                y: gridOut.y,
+                                z: gridOut.dl.map((row: (number | null)[]) =>
+                                  row.map((v) =>
+                                    v && v > 0 ? Math.log10(v) : null
+                                  )
+                                ),
+                                type: "heatmap",
+                                hoverongaps: false,
+                                colorscale: "Viridis",
+                                zmin: dlRange.min,
+                                zmax: dlRange.max,
+                                colorbar: {
+                                  title: `Max ${
+                                    dlMap.Assay || "Assay"
+                                  } (log scale)`,
+                                  tickmode: dlRange.ticks ? "array" : "auto",
+                                  tickvals: dlRange.ticks,
+                                  ticktext: dlRange.tickText,
+                                  len: 0.8,
+                                  thickness: 24,
+                                  outlinewidth: 1,
+                                  x: 1.02,
+                                  y: 0.5,
+                                  yanchor: "middle",
+                                },
+                              },
+                              gridOut.dl_points && {
+                                x: gridOut.dl_points.map((p: number[]) => p[0]),
+                                y: gridOut.dl_points.map((p: number[]) => p[1]),
+                                type: "scattergl",
+                                mode: "markers",
+                                marker: { size: 4, color: "black", opacity: 0.7 },
+                                hoverinfo: "skip",
+                                name: "Samples",
+                              },
+                            ].filter(Boolean)}
+                            layout={{
+                              ...axesLikeNotebook(gridOut),
+                              autosize: true,
+                            }}
+                            config={{
+                              responsive: true,
+                              displaylogo: false,
+                              modeBarButtonsToRemove: ["toImage"],
+                            }}
+                            style={{ width: "100%", height: PLOT_HEIGHT }}
+                          />
+                        );
+                      })()}
                     </div>
 
                     {/* COMPARISON (DL − Original) */}
@@ -1335,6 +1384,12 @@ export default function ESRI3DComparisonApp() {
                       {(() => {
                         const pts = (gridOut.original_points ?? []).concat(
                           gridOut.dl_points ?? []
+                        );
+                        const comparisonRange = getLegendRange(
+                          "comparison",
+                          gridOut.cmp,
+                          legendConfig.comparison,
+                          method
                         );
                         return (
                           <Plot
@@ -1359,8 +1414,8 @@ export default function ESRI3DComparisonApp() {
                                   [0.9, "#4575b4"],
                                   [1, "#313695"],
                                 ],
-                                zmin: -100,
-                                zmax: 100,
+                                zmin: comparisonRange.min,
+                                zmax: comparisonRange.max,
                                 zmid: 0,
                                 colorbar: {
                                   title: "Δ Te_ppm",
@@ -1914,6 +1969,193 @@ function ZipList({
   );
 }
 
+/* Legend Controls */
+function LegendControls({
+  method,
+  legendConfig,
+  onLegendConfigChange,
+  gridOut,
+}: {
+  method: "max" | "mean" | "median";
+  legendConfig: {
+    original: { min: number | null; max: number | null; auto: boolean };
+    dl: { min: number | null; max: number | null; auto: boolean };
+    comparison: { min: number | null; max: number | null; auto: boolean };
+  };
+  onLegendConfigChange: (config: typeof legendConfig) => void;
+  gridOut: {
+    orig: (number | null)[][];
+    dl: (number | null)[][];
+    cmp: (number | null)[][];
+  };
+}) {
+  const updateConfig = (
+    type: "original" | "dl" | "comparison",
+    field: "min" | "max" | "auto",
+    value: number | boolean | null
+  ) => {
+    onLegendConfigChange({
+      ...legendConfig,
+      [type]: {
+        ...legendConfig[type],
+        [field]: value,
+      },
+    });
+  };
+
+  const getCurrentRange = (type: "original" | "dl" | "comparison") => {
+    const data = type === "original" ? gridOut.orig : type === "dl" ? gridOut.dl : gridOut.cmp;
+    return getLegendRange(type, data, legendConfig[type], method);
+  };
+
+  const originalRange = getCurrentRange("original");
+  const dlRange = getCurrentRange("dl");
+  const comparisonRange = getCurrentRange("comparison");
+
+  return (
+    <section className="mt-4 rounded-2xl border border-neutral-200 bg-white p-4 md:p-5">
+      <div className="flex items-center gap-2 mb-3">
+        <LayoutGrid className="h-4 w-4 text-[#7C3AED]" />
+        <h3 className="text-base font-semibold">Legend Configuration</h3>
+      </div>
+      
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Original Legend */}
+        <div className="rounded-xl border border-neutral-200 p-3">
+          <h4 className="text-sm font-medium mb-2">Original Heatmap (log scale)</h4>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={legendConfig.original.auto}
+                onChange={(e) => updateConfig("original", "auto", e.target.checked)}
+                className="h-4 w-4 text-[#7C3AED]"
+              />
+              <span className="text-xs">Auto-scale</span>
+            </label>
+            {!legendConfig.original.auto && (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-neutral-600">Min (log10)</label>
+                  <input
+                    type="number"
+                    value={legendConfig.original.min ?? ""}
+                    onChange={(e) => updateConfig("original", "min", parseFloat(e.target.value) || null)}
+                    placeholder={originalRange.min.toString()}
+                    className="w-full px-2 py-1 text-xs border border-neutral-300 rounded"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-600">Max (log10)</label>
+                  <input
+                    type="number"
+                    value={legendConfig.original.max ?? ""}
+                    onChange={(e) => updateConfig("original", "max", parseFloat(e.target.value) || null)}
+                    placeholder={originalRange.max.toString()}
+                    className="w-full px-2 py-1 text-xs border border-neutral-300 rounded"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="text-xs text-neutral-500">
+              Current: 10{superscript(originalRange.min)} to 10{superscript(originalRange.max)}
+            </div>
+          </div>
+        </div>
+
+        {/* DL Legend */}
+        <div className="rounded-xl border border-neutral-200 p-3">
+          <h4 className="text-sm font-medium mb-2">DL Heatmap (log scale)</h4>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={legendConfig.dl.auto}
+                onChange={(e) => updateConfig("dl", "auto", e.target.checked)}
+                className="h-4 w-4 text-[#7C3AED]"
+              />
+              <span className="text-xs">Auto-scale</span>
+            </label>
+            {!legendConfig.dl.auto && (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-neutral-600">Min (log10)</label>
+                  <input
+                    type="number"
+                    value={legendConfig.dl.min ?? ""}
+                    onChange={(e) => updateConfig("dl", "min", parseFloat(e.target.value) || null)}
+                    placeholder={dlRange.min.toString()}
+                    className="w-full px-2 py-1 text-xs border border-neutral-300 rounded"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-600">Max (log10)</label>
+                  <input
+                    type="number"
+                    value={legendConfig.dl.max ?? ""}
+                    onChange={(e) => updateConfig("dl", "max", parseFloat(e.target.value) || null)}
+                    placeholder={dlRange.max.toString()}
+                    className="w-full px-2 py-1 text-xs border border-neutral-300 rounded"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="text-xs text-neutral-500">
+              Current: 10{superscript(dlRange.min)} to 10{superscript(dlRange.max)}
+            </div>
+          </div>
+        </div>
+
+        {/* Comparison Legend */}
+        <div className="rounded-xl border border-neutral-200 p-3">
+          <h4 className="text-sm font-medium mb-2">Comparison Heatmap</h4>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={legendConfig.comparison.auto}
+                onChange={(e) => updateConfig("comparison", "auto", e.target.checked)}
+                className="h-4 w-4 text-[#7C3AED]"
+              />
+              <span className="text-xs">Auto-scale</span>
+            </label>
+            {!legendConfig.comparison.auto && (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-neutral-600">Min</label>
+                  <input
+                    type="number"
+                    value={legendConfig.comparison.min ?? ""}
+                    onChange={(e) => updateConfig("comparison", "min", parseFloat(e.target.value) || null)}
+                    placeholder={comparisonRange.min.toString()}
+                    className="w-full px-2 py-1 text-xs border border-neutral-300 rounded"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-600">Max</label>
+                  <input
+                    type="number"
+                    value={legendConfig.comparison.max ?? ""}
+                    onChange={(e) => updateConfig("comparison", "max", parseFloat(e.target.value) || null)}
+                    placeholder={comparisonRange.max.toString()}
+                    className="w-full px-2 py-1 text-xs border border-neutral-300 rounded"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="text-xs text-neutral-500">
+              Current: {comparisonRange.min.toFixed(1)} to {comparisonRange.max.toFixed(1)}
+              {method === "max" && legendConfig.comparison.auto && (
+                <div className="text-neutral-400">(Fixed range for max method)</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /* Controls Bar (parser-friendly) */
 function ControlsBar(props: {
   method: null | "max" | "mean" | "median";
@@ -1998,7 +2240,7 @@ function ControlsBar(props: {
               return (
                 <button
                   key={opt.value}
-                  ref={(el) => (tabRefs.current[idx] = el)}
+                  ref={(el) => { tabRefs.current[idx] = el; }}
                   type="button"
                   role="tab"
                   aria-selected={active}
@@ -2255,9 +2497,6 @@ const createQQPlot = (data: PlotData) => {
 
 const PLOT_HEIGHT = 600; // match attached images
 
-// Use power-of-ten tick labels like 10⁻² … 10³
-const POW_TICKS = [-2, -1, 0, 1, 2, 3] as const;
-
 function superscript(n: number): string {
   const map: Record<string, string> = {
     "-": "⁻",
@@ -2277,9 +2516,6 @@ function superscript(n: number): string {
     .join("");
 }
 
-function powTickText(vals: readonly number[]) {
-  return vals.map((v) => `10${superscript(v)}`);
-}
 
 function axesLikeNotebook(gridOut: {
   xmin: number;
@@ -2331,4 +2567,108 @@ function axesLikeNotebook(gridOut: {
     },
     margin: { l: 76, r: 76, b: 62, t: 90 }, // t: 90 leaves more space above grid for title
   };
+}
+
+// Helper functions for legend scaling
+function calculateDataRange(data: (number | null)[][]): { min: number; max: number } {
+  const values: number[] = [];
+  data.forEach(row => {
+    row.forEach(val => {
+      if (val !== null && isFinite(val)) {
+        values.push(val);
+      }
+    });
+  });
+  
+  if (values.length === 0) {
+    return { min: 0, max: 1 };
+  }
+  
+  return {
+    min: Math.min(...values),
+    max: Math.max(...values)
+  };
+}
+
+function calculateLogRange(data: (number | null)[][]): { min: number; max: number } {
+  const values: number[] = [];
+  data.forEach(row => {
+    row.forEach(val => {
+      if (val !== null && isFinite(val) && val > 0) {
+        values.push(Math.log10(val));
+      }
+    });
+  });
+  
+  if (values.length === 0) {
+    return { min: -2, max: 3 };
+  }
+  
+  const minLog = Math.min(...values);
+  const maxLog = Math.max(...values);
+  
+  // Round to nearest integer for cleaner ticks
+  return {
+    min: Math.floor(minLog),
+    max: Math.ceil(maxLog)
+  };
+}
+
+function getLegendRange(
+  type: "original" | "dl" | "comparison",
+  data: (number | null)[][],
+  config: { min: number | null; max: number | null; auto: boolean },
+  method: "max" | "mean" | "median" | null
+): { min: number; max: number; ticks?: number[]; tickText?: string[] } {
+  // Method-specific logic for fixed vs configurable legends
+  if (type === "comparison") {
+    // Comparison plot logic
+    if (method === "max" && config.auto) {
+      // Max method uses fixed range by default
+      return { min: -100, max: 100 };
+    } else if (!config.auto && config.min !== null && config.max !== null) {
+      // User-defined range
+      return { min: config.min, max: config.max };
+    } else {
+      // Auto-scale based on data
+      const range = calculateDataRange(data);
+      const padding = Math.max(0.1 * (range.max - range.min), 0.1);
+      return { 
+        min: range.min - padding, 
+        max: range.max + padding 
+      };
+    }
+  } else {
+    // Original/DL plot logic (log scale)
+    if (!config.auto && config.min !== null && config.max !== null) {
+      // User-defined range
+      const ticks = [];
+      const tickText = [];
+      for (let i = config.min; i <= config.max; i++) {
+        ticks.push(i);
+        tickText.push(`10${superscript(i)}`);
+      }
+      return { 
+        min: config.min, 
+        max: config.max,
+        ticks,
+        tickText
+      };
+    } else {
+      // Auto-scale based on data
+      const range = calculateLogRange(data);
+      const ticks = [];
+      const tickText = [];
+      for (let i = range.min; i <= range.max; i++) {
+        ticks.push(i);
+        tickText.push(`10${superscript(i)}`);
+      }
+      return { 
+        min: range.min, 
+        max: range.max,
+        ticks,
+        tickText
+      };
+    }
+  }
 }
