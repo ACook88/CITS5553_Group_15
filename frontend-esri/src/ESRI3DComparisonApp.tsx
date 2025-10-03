@@ -606,7 +606,9 @@ export default function ESRI3DComparisonApp() {
         dlMap.Northing,
         dlMap.Easting,
         method || undefined,
-        gridSize || undefined
+        gridSize || undefined,
+        // Pass legend configuration for dynamic scaling
+        legendConfig
       );
 
       // Verify blob is valid
@@ -1511,6 +1513,19 @@ export default function ESRI3DComparisonApp() {
                         <X className="h-5 w-5" />
                       </button>
                     </div>
+                    
+                    {method && gridOut && (
+                      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Info className="h-4 w-4 text-blue-600" />
+                          <span className="text-sm font-medium text-blue-800">Legend Configuration</span>
+                        </div>
+                        <p className="text-xs text-blue-700">
+                          Exported heatmaps will use the same legend settings as the current visualization. 
+                          Adjust the legend configuration in the Comparison section before exporting if needed.
+                        </p>
+                      </div>
+                    )}
 
                     <div className="space-y-3">
                       {/* Select All checkbox */}
