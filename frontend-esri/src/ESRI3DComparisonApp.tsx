@@ -35,7 +35,7 @@ import Plotly from "plotly.js-dist-min";
 
 const isAcceptedName = (name: string) => {
   const lower = name.toLowerCase().trim();
-  return lower.endsWith(".zip") || lower.endsWith(".csv");
+  return lower.endsWith(".zip") || lower.endsWith(".csv") || lower.endsWith(".dbf");
 };
 const isAccepted = (file: File | null | undefined) =>
   !!file && isAcceptedName(file.name);
@@ -218,7 +218,7 @@ export default function ESRI3DComparisonApp() {
       if (!isAccepted(file)) {
         setErrors((e) => ({
           ...e,
-          [kind]: "Only .zip or .csv files are accepted.",
+          [kind]: "Only .zip, .csv or .dbf files are accepted.",
         }));
         return;
       }
@@ -227,7 +227,7 @@ export default function ESRI3DComparisonApp() {
       if (kind === "dl") setDlZip(file);
       setToast({
         msg: `${
-          kind === "original" ? "Original ESRI" : "DL ESRI"
+          kind === "original" ? "Original Data" : "DL Data"
         } file uploaded successfully.`,
       });
     },
@@ -818,10 +818,10 @@ export default function ESRI3DComparisonApp() {
                 <ol className="grid grid-cols-1 gap-3 sm:grid-cols-6">
                   <StepItem
                     number={1}
-                    title="Original ESRI"
+                    title="Original Data"
                     done={!!originalZip}
                   />
-                  <StepItem number={2} title="DL ESRI" done={!!dlZip} />
+                  <StepItem number={2} title="DL Data" done={!!dlZip} />
                   <StepItem number={3} title="Mapping" done={analysisRun} />
                   <StepItem number={4} title="Method" done={method !== null} />
                   {/* Remove grid size step here */}
@@ -842,8 +842,8 @@ export default function ESRI3DComparisonApp() {
               <div className="grid gap-6 md:grid-cols-2">
                 <UploadPanel
                   step={1}
-                  title="File Upload for Original ESRI Data"
-                  subtitle="Only .zip or .csv files are accepted. Drag & drop or click to browse."
+                  title="File Upload for Original Data"
+                  subtitle="Only .zip, .csv or .dbf files are accepted. Note: Large .dbf files may take longer to process."
                   file={originalZip}
                   error={errors.original}
                   onClear={() => validateAndSet(null, "original")}
@@ -858,7 +858,7 @@ export default function ESRI3DComparisonApp() {
                   <input
                     ref={inputOriginalRef}
                     type="file"
-                    accept=".zip,.csv"
+                    accept=".zip,.csv,.dbf"
                     className="hidden"
                     onChange={(e) => handleInput(e, "original")}
                   />
@@ -866,8 +866,8 @@ export default function ESRI3DComparisonApp() {
 
                 <UploadPanel
                   step={2}
-                  title="File Upload for DL ESRI Data"
-                  subtitle="Only .zip or .csv files are accepted. Drag & drop or click to browse."
+                  title="File Upload for DL Data"
+                  subtitle="Only .zip, .csv or .dbf files are accepted. Note: Large .dbf files may take longer to process."
                   file={dlZip}
                   error={errors.dl}
                   onClear={() => validateAndSet(null, "dl")}
@@ -882,7 +882,7 @@ export default function ESRI3DComparisonApp() {
                   <input
                     ref={inputDlRef}
                     type="file"
-                    accept=".zip,.csv"
+                    accept=".zip,.csv,.dbf"
                     className="hidden"
                     onChange={(e) => handleInput(e, "dl")}
                   />
@@ -902,7 +902,10 @@ export default function ESRI3DComparisonApp() {
                       : "bg-neutral-200 text-neutral-500 cursor-not-allowed")
                   }
                 >
-                  {loadingColumns ? "Loading…" : "Load Data"}
+                  {loadingColumns ? (() => {
+                    const hasDbf = (originalZip?.name.toLowerCase().includes('.dbf') || dlZip?.name.toLowerCase().includes('.dbf'));
+                    return hasDbf ? "Processing DBF files…" : "Loading…";
+                  })() : "Load Data"}
                   {dataLoaded && (
                     <span className="inline-flex items-center text-[#10B981] ml-2">
                       <CheckCircle2 className="h-5 w-5" />
@@ -1814,10 +1817,7 @@ function UploadPanel({
       transition={{ duration: 0.35, ease: "easeOut" }}
       className="rounded-3xl border border-neutral-200 bg-[#F9FAFB] shadow-md overflow-hidden"
     >
-      <div className="p-5 border-b border-neutral-200 flex items-start gap-3">
-        <div className="rounded-xl bg-[#7C3AED] text-white px-2 py-1 text-xs font-semibold">
-          Step {step}
-        </div>
+      <div className="p-5 border-b border-neutral-200">
         <div>
           <h3 className="text-base font-semibold">{title}</h3>
           <p className="mt-1 text-sm text-neutral-600">{subtitle}</p>
@@ -1831,19 +1831,19 @@ function UploadPanel({
         tabIndex={0}
         onClick={onBrowse}
         onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onBrowse()}
-        aria-label="Upload .zip or .csv file"
+        aria-label="Upload .zip, .csv or .dbf file"
       >
         <div className="px-6 py-10 text-center">
           <div className="mx-auto mb-4 h-12 w-12 rounded-2xl bg-[#7C3AED]/10 grid place-items-center text-[#7C3AED]">
             <Upload className="h-6 w-6" />
           </div>
           <p className="text-sm font-semibold">
-            Drag & drop a .zip or .csv here, or{" "}
+            Drag & drop a .zip, .csv or .dbf here, or{" "}
             <span className="underline text-[#7C3AED]">browse</span>
           </p>
           <div className="mt-2 flex items-center justify-center gap-2 text-xs text-neutral-600">
             <Badge>
-              <FileArchive className="h-3.5 w-3.5" /> .zip or .csv
+              <FileArchive className="h-3.5 w-3.5" /> .zip, .csv or .dbf
             </Badge>
           </div>
         </div>
