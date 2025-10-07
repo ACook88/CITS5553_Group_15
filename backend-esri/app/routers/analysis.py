@@ -340,6 +340,8 @@ async def export_plots(
     dl_easting: str | None = Form(None),
     method: Literal["mean", "median", "max"] | None = Form(None),
     grid_size: float | None = Form(None),
+    # optional legend configuration
+    legend_config: str | None = Form(None),
 ):
     """
     Regenerates the selected plots and returns them in a ZIP.
@@ -350,6 +352,23 @@ async def export_plots(
 
     try:
         flags = json.loads(selected_plots)  # { originalHistogram: bool, ... }
+        
+        # Parse legend configuration if provided
+        legend_config = json.loads(legend_config) if legend_config else None
+        if legend_config:
+            # Set defaults for missing values
+            default_config = {
+                "original": {"min": None, "max": None, "auto": True},
+                "dl": {"min": None, "max": None, "auto": True},
+                "comparison": {"min": None, "max": None, "auto": True}
+            }
+            for plot_type in ["original", "dl", "comparison"]:
+                if plot_type not in legend_config:
+                    legend_config[plot_type] = default_config[plot_type]
+                else:
+                    for key in ["min", "max", "auto"]:
+                        if key not in legend_config[plot_type]:
+                            legend_config[plot_type][key] = default_config[plot_type][key]
 
         images: list[tuple[str, bytes]] = []
 
@@ -496,12 +515,79 @@ async def export_plots(
             def _save_fig(fig, name):
                 b = io.BytesIO(); fig.tight_layout(pad=2.0); fig.savefig(b, format="png", dpi=150); plt.close(fig); b.seek(0)
                 images.append((name, b.read()))
+            
+            # Helper functions for dynamic legend scaling
+            def calculate_data_range(data):
+                """Calculate min/max range for linear data"""
+                finite_data = data[np.isfinite(data)]
+                if len(finite_data) == 0:
+                    return 0, 1
+                return float(np.min(finite_data)), float(np.max(finite_data))
+            
+            def calculate_log_range(data):
+                """Calculate min/max range for log-scale data"""
+                finite_positive = data[np.isfinite(data) & (data > 0)]
+                if len(finite_positive) == 0:
+                    return -2, 3
+                log_data = np.log10(finite_positive)
+                return float(np.floor(np.min(log_data))), float(np.ceil(np.max(log_data)))
+            
+            def get_legend_range(plot_type, data, method):
+                """Get legend range based on configuration and method"""
+                if not legend_config or plot_type not in legend_config:
+                    # Default behavior
+                    if plot_type == "comparison":
+                        if method == "max":
+                            return -100, 100, None, None
+                        else:
+                            min_val, max_val = calculate_data_range(data)
+                            padding = max(0.1 * (max_val - min_val), 0.1)
+                            return min_val - padding, max_val + padding, None, None
+                    else:
+                        min_log, max_log = calculate_log_range(data)
+                        ticks = list(range(int(min_log), int(max_log) + 1))
+                        tick_labels = [f'10{superscript(i)}' for i in ticks]
+                        return min_log, max_log, ticks, tick_labels
+                
+                config = legend_config[plot_type]
+                
+                if plot_type == "comparison":
+                    if method == "max" and config["auto"]:
+                        return -100, 100, None, None
+                    elif not config["auto"] and config["min"] is not None and config["max"] is not None:
+                        return config["min"], config["max"], None, None
+                    else:
+                        min_val, max_val = calculate_data_range(data)
+                        padding = max(0.1 * (max_val - min_val), 0.1)
+                        return min_val - padding, max_val + padding, None, None
+                else:
+                    if not config["auto"] and config["min"] is not None and config["max"] is not None:
+                        ticks = list(range(int(config["min"]), int(config["max"]) + 1))
+                        tick_labels = [f'10{superscript(i)}' for i in ticks]
+                        return config["min"], config["max"], ticks, tick_labels
+                    else:
+                        min_log, max_log = calculate_log_range(data)
+                        ticks = list(range(int(min_log), int(max_log) + 1))
+                        tick_labels = [f'10{superscript(i)}' for i in ticks]
+                        return min_log, max_log, ticks, tick_labels
+            
+            def superscript(n):
+                """Convert number to superscript text"""
+                superscript_map = {
+                    "-": "⁻", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+                    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"
+                }
+                return ''.join(superscript_map.get(c, c) for c in str(n))
 
             if flags.get("originalHeatmap"):
                 fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
                 z = np.where(np.isfinite(arr_orig) & (arr_orig > 0), np.log10(arr_orig), np.nan)
+                
+                # Get dynamic legend range
+                vmin, vmax, ticks, tick_labels = get_legend_range("original", arr_orig, method)
+                
                 im = ax.imshow(z.T, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()], 
-                              aspect="equal", cmap="viridis", vmin=-2, vmax=3)
+                              aspect="equal", cmap="viridis", vmin=vmin, vmax=vmax)
                 # Add black dots for data points
                 ax.scatter(df_o[e_col_o], df_o[n_col_o], c='black', s=4, alpha=0.7, marker='o')
                 ax.set_title("Original (log10)", fontsize=14, fontweight='bold')
@@ -522,17 +608,22 @@ async def export_plots(
                 # Create colorbar with proper formatting
                 cbar = fig.colorbar(im, ax=ax, label=f"Max {original_assay} (log scale)")
                 cbar.set_label(f"Max {original_assay} (log scale)", fontsize=12)
-                # Set colorbar ticks to match interactive plot
-                cbar.set_ticks([-2, -1, 0, 1, 2, 3])
-                cbar.set_ticklabels(['10⁻²', '10⁻¹', '10⁰', '10¹', '10²', '10³'])
+                # Set colorbar ticks dynamically
+                if ticks and tick_labels:
+                    cbar.set_ticks(ticks)
+                    cbar.set_ticklabels(tick_labels)
                 
                 _save_fig(fig, "original_heatmap.png")
 
             if flags.get("dlHeatmap"):
                 fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
                 z = np.where(np.isfinite(arr_dl) & (arr_dl > 0), np.log10(arr_dl), np.nan)
+                
+                # Get dynamic legend range
+                vmin, vmax, ticks, tick_labels = get_legend_range("dl", arr_dl, method)
+                
                 im = ax.imshow(z.T, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()], 
-                              aspect="equal", cmap="viridis", vmin=-2, vmax=3)
+                              aspect="equal", cmap="viridis", vmin=vmin, vmax=vmax)
                 # Add black dots for data points
                 ax.scatter(d_pts[:, 0], d_pts[:, 1], c='black', s=4, alpha=0.7, marker='o')
                 ax.set_title("DL (log10)", fontsize=14, fontweight='bold')
@@ -553,16 +644,27 @@ async def export_plots(
                 # Create colorbar with proper formatting
                 cbar = fig.colorbar(im, ax=ax, label=f"Max {dl_assay} (log scale)")
                 cbar.set_label(f"Max {dl_assay} (log scale)", fontsize=12)
-                # Set colorbar ticks to match interactive plot
-                cbar.set_ticks([-2, -1, 0, 1, 2, 3])
-                cbar.set_ticklabels(['10⁻²', '10⁻¹', '10⁰', '10¹', '10²', '10³'])
+                # Set colorbar ticks dynamically
+                if ticks and tick_labels:
+                    cbar.set_ticks(ticks)
+                    cbar.set_ticklabels(tick_labels)
                 
                 _save_fig(fig, "dl_heatmap.png")
 
             if flags.get("comparisonHeatmap"):
                 fig = plt.figure(figsize=(12, 7)); ax = fig.add_subplot(111)
-                vmax = 100.0
-                im = ax.imshow(arr_cmp.T, origin="lower", vmin=-vmax, vmax=vmax, cmap="RdBu_r",
+                
+                # Get dynamic legend range
+                vmin, vmax, ticks, tick_labels = get_legend_range("comparison", arr_cmp, method)
+                
+                # Use the same custom colorscale as the interactive plot
+                from matplotlib.colors import LinearSegmentedColormap
+                colors = ['#a50026', '#d73027', '#f46d43', '#fdae61', '#fee090', 
+                         '#ffffbf', '#e0f3f8', '#abd9e9', '#74add1', '#4575b4', '#313695']
+                n_bins = len(colors)
+                custom_cmap = LinearSegmentedColormap.from_list('custom_diverging', colors, N=n_bins)
+                
+                im = ax.imshow(arr_cmp.T, origin="lower", vmin=vmin, vmax=vmax, cmap=custom_cmap,
                                extent=[x.min(), x.max(), y.min(), y.max()], aspect="equal")
                 # Add black dots for both original and DL data points
                 ax.scatter(o_pts[:, 0], o_pts[:, 1], c='black', s=4, alpha=0.7, marker='o', label='Original')
@@ -585,8 +687,20 @@ async def export_plots(
                 # Create colorbar with proper formatting
                 cbar = fig.colorbar(im, ax=ax, label="Δ Te_ppm")
                 cbar.set_label("Δ Te_ppm", fontsize=12)
-                # Set colorbar ticks to match interactive plot
-                cbar.set_ticks([-100, -75, -50, -25, 0, 25, 50, 75, 100])
+                # Set colorbar ticks dynamically
+                if ticks and tick_labels:
+                    cbar.set_ticks(ticks)
+                    cbar.set_ticklabels(tick_labels)
+                else:
+                    # Default ticks for comparison plot
+                    tick_range = max(abs(vmin), abs(vmax))
+                    if tick_range <= 100:
+                        cbar.set_ticks([-100, -75, -50, -25, 0, 25, 50, 75, 100])
+                    else:
+                        # Generate ticks based on range
+                        step = tick_range / 4
+                        ticks = [vmin + i * step for i in range(5)]
+                        cbar.set_ticks(ticks)
                 
                 _save_fig(fig, "comparison_heatmap.png")
 

@@ -157,7 +157,13 @@ export async function exportPlots(
   dlNorthing?: string,
   dlEasting?: string,
   method?: string,
-  gridSize?: number
+  gridSize?: number,
+  // Legend configuration parameters
+  legendConfig?: {
+    original: { min: number | null; max: number | null; auto: boolean };
+    dl: { min: number | null; max: number | null; auto: boolean };
+    comparison: { min: number | null; max: number | null; auto: boolean };
+  }
 ): Promise<Blob> {
   const formData = new FormData();
   formData.append("original_file", originalFile);
@@ -173,6 +179,11 @@ export async function exportPlots(
   if (dlEasting) formData.append("dl_easting", dlEasting);
   if (method) formData.append("method", method);
   if (gridSize !== undefined) formData.append("grid_size", gridSize.toString());
+  
+  // Add legend configuration if provided
+  if (legendConfig) {
+    formData.append("legend_config", JSON.stringify(legendConfig));
+  }
 
   const response = await fetch(`${API}/api/analysis/export/plots`, {
     method: "POST",
@@ -225,4 +236,5 @@ export async function exportGridCSV(
 
   return response.blob();
 }
+ 
  
