@@ -33,8 +33,8 @@ def _clean_and_stats(df: pd.DataFrame, assay_col: str) -> Dict[str, float]:
 
 @router.post("/summary")
 async def summary(
-    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
-    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
+    original: UploadFile = File(..., description="Original Data .csv, .dbf or .zip"),
+    dl: UploadFile       = File(..., description="DL Data .csv, .dbf or .zip"),
     original_assay: str  = Form(...),
     dl_assay: str        = Form(...),
 ):
@@ -75,8 +75,8 @@ def _fig_to_b64(fig) -> str:
 
 @router.post("/plots", response_model=PlotsResponse)
 async def plots(
-    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
-    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
+    original: UploadFile = File(..., description="Original Data .csv, .dbf or .zip"),
+    dl: UploadFile       = File(..., description="DL Data .csv, .dbf or .zip"),
     original_assay: str  = Form(...),
     dl_assay: str        = Form(...),
 ):
@@ -131,8 +131,8 @@ async def plots(
 
 @router.post("/plots-data", response_model=PlotsDataResponse)
 async def plots_data(
-    original: UploadFile = File(..., description="Original ESRI .csv or .zip"),
-    dl: UploadFile       = File(..., description="DL ESRI .csv or .zip"),
+    original: UploadFile = File(..., description="Original Data .csv, .dbf or .zip"),
+    dl: UploadFile       = File(..., description="DL Data .csv, .dbf or .zip"),
     original_assay: str  = Form(...),
     dl_assay: str        = Form(...),
 ):
@@ -721,7 +721,7 @@ async def export_plots(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as e: 
         raise HTTPException(status_code=400, detail=str(e))
 
 
